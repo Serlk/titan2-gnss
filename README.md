@@ -147,3 +147,5 @@ license in an `SPDX-License-Identifier` line (or in `REUSE.toml`); the AOSP head
 - [titan2-fingerprint](https://github.com/Serlk/titan2-fingerprint): the fingerprint reader (FocalTech sensor through the TEE).
 - [titan2-gnss](https://github.com/Serlk/titan2-gnss): GNSS (navigation daemon, GPS HAL bridge, EPO assistance data).
 - [titan2-android](https://github.com/Serlk/titan2-android): Android builds for the Titan 2.
+
+Licensing: [LICENSE](LICENSE) (GPL-2.0), per-file details in [LICENSING.md](LICENSING.md).
