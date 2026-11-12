@@ -13,6 +13,10 @@ Assistance data (EPO predicted ephemeris) is downloaded by an open client, `t2-e
 > **Status: work in progress, for developers.** Partially tested on the phone; expect rough
 > edges (see "Not done" below).
 
+> **Status:** satellite fix and position through GeoClue work on our phone, with EPO A-GPS.
+> The setup below has not yet been run end to end on a freshly installed phone; please report
+> what differs.
+
 ## What is not here
 
 No vendor binaries, libraries, configuration, calibration or EPO files: nothing of the factory
