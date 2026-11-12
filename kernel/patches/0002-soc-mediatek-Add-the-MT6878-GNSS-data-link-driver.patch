@@ -1,0 +1,1520 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: serlk <22211586+Serlk@users.noreply.github.com>
+Date: Thu, 12 Nov 2026 18:23:44 +0300
+Subject: [PATCH 2/3] soc: mediatek: Add the MT6878 GNSS data link driver
+
+The AP side of the GNSS DSPs of the MT6878 CONNSYS (CONFIG_MTK_GPS_DL):
+/dev/gpsdl0 and /dev/gpsdl1 for the GNSS navigation daemon, each a byte
+stream over DMA rings in the CONNSYS EMI, with the power and data-link
+sequences done through the BL31 SiP service as the downstream gps_drv_dl
+driver does in its TF-A build, plus the gps_emi, gps_pwr and gps2scp
+devices the daemon opens. When the boot loader does not write "emi-addr"
+into the node, the GNSS EMI is taken right after the CONNSYS EMI, as in
+the factory layout. Ported from MediaTek's GPL connectivity/gps/data_link
+driver.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ drivers/soc/mediatek/Kconfig      |   11 +
+ drivers/soc/mediatek/Makefile     |    1 +
+ drivers/soc/mediatek/mtk-gps-dl.c | 1454 +++++++++++++++++++++++++++++
+ 3 files changed, 1466 insertions(+)
+ create mode 100644 drivers/soc/mediatek/mtk-gps-dl.c
+
+diff --git a/drivers/soc/mediatek/Kconfig b/drivers/soc/mediatek/Kconfig
+index f593a80ce2b1..2e1b25cf4097 100644
+--- a/drivers/soc/mediatek/Kconfig
++++ b/drivers/soc/mediatek/Kconfig
+@@ -43,6 +43,17 @@ config MTK_LPM
+ 	  the interrupts kept through MCUSYS off, the SPM constraints, and
+ 	  the report of what woke the system and how deep it slept.
+ 
++config MTK_GPS_DL
++	tristate "MediaTek MT6878 GNSS data link (CONNSYS GPS DSPs)"
++	depends on ARCH_MEDIATEK || COMPILE_TEST
++	depends on MTK_CONNINFRA && HAVE_ARM_SMCCC
++	help
++	  The AP side of the GNSS DSPs of the MT6878 CONNSYS: /dev/gpsdl0 and
++	  /dev/gpsdl1 for the navigation daemon (a byte stream each over DMA
++	  rings in the CONNSYS EMI), with the power and data link sequences
++	  done through the trusted firmware as the downstream module does. Also
++	  the gps_emi, gps_pwr and gps2scp devices the daemon opens.
++
+ config MTK_DEVAPC
+ 	tristate "Mediatek Device APC Support"
+ 	help
+diff --git a/drivers/soc/mediatek/Makefile b/drivers/soc/mediatek/Makefile
+index ad51380d36cc..869f48d6543f 100644
+--- a/drivers/soc/mediatek/Makefile
++++ b/drivers/soc/mediatek/Makefile
+@@ -5,6 +5,7 @@ obj-$(CONFIG_MTK_CONNINFRA) += mtk-conninfra.o
+ obj-$(CONFIG_MTK_DEVAPC) += mtk-devapc.o
+ obj-$(CONFIG_MTK_DVFSRC) += mtk-dvfsrc.o
+ obj-$(CONFIG_MTK_LPM) += mtk-lpm.o
++obj-$(CONFIG_MTK_GPS_DL) += mtk-gps-dl.o
+ obj-$(CONFIG_MTK_INFRACFG) += mtk-infracfg.o
+ obj-$(CONFIG_MTK_PMIC_WRAP) += mtk-pmic-wrap.o
+ obj-$(CONFIG_MTK_REGULATOR_COUPLER) += mtk-regulator-coupler.o
+diff --git a/drivers/soc/mediatek/mtk-gps-dl.c b/drivers/soc/mediatek/mtk-gps-dl.c
+new file mode 100644
+index 000000000000..25121cfbcd8f
+--- /dev/null
++++ b/drivers/soc/mediatek/mtk-gps-dl.c
+@@ -0,0 +1,1454 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/*
++ * MediaTek MT6878 GNSS data link: the AP side of the two GNSS DSPs (L1 and
++ * L5) of the CONNSYS, as the downstream gps_drv_dl_v051 module presents it to
++ * the navigation daemon (mnld): /dev/gpsdl0 and /dev/gpsdl1, a byte
++ * stream each over DMA rings in the CONNSYS EMI, and the small devices
++ * gps_emi, gps_pwr and gps2scp the daemon opens along with them.
++ *
++ * On this SoC the downstream module is built "TFA": the GNSS power, DMA, USRT
++ * and mailbox registers are written by the trusted firmware (BL31) on SiP
++ * calls (function 0x537, one opid per operation); the kernel owns the
++ * rings, the interrupts and the sequencing. This driver speaks the same
++ * calls, so the hardware is handled exactly as the factory firmware does.
++ *
++ * The call table, the ring layout, the interrupt handling and the
++ * sequences follow MediaTek's GPL-2.0 gps_drv_dl driver
++ * (kernel_modules/connectivity/gps/data_link, Copyright (c) 2019-2023
++ * MediaTek Inc.). Not done: the deep sleep variants without ioctl path,
++ * the A-die force-off recovery, MET, the firmware log device, MT6686.
++ *
++ * Copyright (c) 2026 serlk <22211586+Serlk@users.noreply.github.com>
++ */
++
++#include <linux/arm-smccc.h>
++#include <linux/cdev.h>
++#include <linux/delay.h>
++#include <linux/device.h>
++#include <linux/fs.h>
++#include <linux/interrupt.h>
++#include <linux/io.h>
++#include <linux/iopoll.h>
++#include <linux/miscdevice.h>
++#include <linux/module.h>
++#include <linux/mutex.h>
++#include <linux/of.h>
++#include <linux/platform_device.h>
++#include <linux/pm_wakeup.h>
++#include <linux/poll.h>
++#include <linux/sched/signal.h>
++#include <linux/slab.h>
++#include <linux/soc/mediatek/mtk-conninfra.h>
++#include <linux/timekeeping.h>
++#include <linux/uaccess.h>
++#include <linux/wait.h>
++
++#include <asm/arch_timer.h>
++
++#define MTK_SIP_GPS_CONTROL	ARM_SMCCC_CALL_VAL(ARM_SMCCC_FAST_CALL, \
++						   ARM_SMCCC_SMC_64, \
++						   ARM_SMCCC_OWNER_SIP, 0x537)
++
++/* the opids of the trusted firmware */
++#define OP_COMMON_ON_SET_FLAG		0x00
++#define  COMMON_ON_MAGIC		0xdb9db9
++#define OP_WAKEUP_CONNINFRA_TOP_OFF	0x01
++#define OP_COMMON_ON_PART1		0x02
++#define OP_COMMON_ON_PART2		0x03	/* EMI remap */
++#define OP_COMMON_ON_PART3		0x04
++#define OP_COMMON_ON_PART4		0x05
++#define OP_COMMON_ON_FAIL		0x08
++#define OP_COMMON_ON_INNER_FAIL		0x09
++#define OP_COMMON_ON_PART5		0x0a
++#define OP_PWR_STAT_CTRL		0x0b
++#define OP_DSP_ON_AND_POLL_ACK		0x0c
++#define OP_USRT_CTRL			0x0d
++#define OP_CFG_DSP_MEM_AND_DSP_OFF	0x0e
++#define OP_COMMON_OFF_PART1		0x0f
++#define OP_COMMON_OFF_PART2		0x10
++#define OP_SW_REQUEST_EMI_USAGE		0x11
++#define OP_COMMON_OFF_PART3		0x12
++#define OP_GET_MCUB_INFO		0x13
++#define OP_CLEAR_MCUB_D2A_FLAG		0x14
++#define OP_POLL_USRT_DSP_RX_EMPTY	0x15
++#define OP_SET_DMA_START		0x16
++#define OP_MCUB_DSP_READ_REQUEST	0x18
++#define OP_USRT_HAS_SET_NODATA_FLAG	0x19
++#define OP_USRT_CLEAR_NODATA_IRQ	0x1a
++#define OP_GET_DMA_LEFT_LEN		0x1b
++#define OP_SET_DMA_STOP			0x1c
++#define OP_GET_DMA_INT_STATUS		0x1e
++#define OP_MVCD_GET_DSP_BOOT_UP_INFO	0x1f
++#define OP_MVCD_SEND_DSP_FRAGMENT	0x20
++#define OP_SET_ADIE_CHIPID		0x4a
++#define OP_COMMON_ENTER_DPSTOP		0x4c
++#define OP_COMMON_LEAVE_DPSTOP		0x4d
++#define OP_COMMON_CLEAR_WAKEUP_SOURCE	0x4e
++#define OP_COMMON_ENABLE_ADIE		0x4f
++#define OP_COMMON_LEAVE_DPSTOP2		0x50
++
++/* PWR_STAT_CTRL / DSP_OFF control codes */
++#define DSP_L1_ON		0
++#define DSP_L1_OFF		1
++#define DSP_L5_ON		2
++#define DSP_L5_OFF		3
++#define DSP_L1_ENTER_DSTOP	6
++#define DSP_L1_EXIT_DSTOP	7
++#define DSP_L5_ENTER_DSTOP	10
++#define DSP_L5_EXIT_DSTOP	11
++#define DSP_L1_CLEAR_PWR_STAT	12
++#define DSP_L5_CLEAR_PWR_STAT	13
++
++/* MCUB D2A flags */
++#define D2A_RAMCODE_READY	BIT(0)
++#define D2A_REG_READ_READY	BIT(1)
++#define D2A_RESET_DONE		BIT(3)
++#define D2A_DEAD_MASK		0xffff0000
++#define D2A_DEAD		0xdead0000
++
++#define CONN_INFRA_VERSION_MT6878	0x02050401
++
++/* the GNSS EMI region (downstream gps_dl_reserved_mem_layout) */
++#define EMI_ICAP_SIZE		0x50000
++#define EMI_TX_RING(l)		(0x51000 + (l) * 0x3000)
++#define EMI_RX_RING(l)		(0x57000 + (l) * 0x3000)
++#define EMI_USED		0x65000
++#define RING_SIZE		8192
++#define RX_TRANSFER_MAX		512	/* what one read() delivers at most */
++#define WRITE_MAX		2048
++
++/* CONN_GPS window (host 0x18c00000 = GPS bus 0x80000000) */
++#define GPS_SLP_PWR_CTL(l)	(0x01020 + 4 * (l))
++#define GPS_TOP_OFF_PWR_CTL	0x0102c
++#define GPS_BGF_IP_VERSION	0x21010
++#define GPS_BGF_IP_CONFIG	0x21014
++#define GPS_CLKGEN1_CTL		0x21104
++
++#define TIA2_RC_SEL_CLEAR	0x00033333
++
++enum gpsdl_link_state {
++	LINK_CLOSED,
++	LINK_OPENED,
++	LINK_SUSPENDED,
++	LINK_RESET_DONE,
++};
++
++enum gpsdl_dsp_state {
++	DSP_OFF,
++	DSP_TURNED_ON,
++	DSP_RESET_DONE,
++	DSP_WORKING,
++	DSP_HW_STOP,
++	DSP_WAKEN_UP,
++};
++
++/* ioctls of /dev/gpsdlN: plain numbers, as the downstream module */
++#define GPSDL_IOC_CO_CLOCK_FLAG		11
++#define GPSDL_IOC_TRIGGER_ASSERT	12
++#define GPSDL_IOC_QUERY_STATUS		13
++#define GPSDL_IOC_HW_SUSPEND		18
++#define GPSDL_IOC_HW_RESUME		19
++#define GPSDL_IOC_LISTEN_RST_EVT	20
++#define GPSDL_IOC_GET_MD_STATUS		21
++#define GPSDL_IOC_GET_DSP_BOOTUP_INFO	23
++#define GPSDL_IOC_GET_CWDSP_BOOTUP_INFO	24
++#define GPSDL_IOC_DSP_MVCD_FRAGMENT	25
++#define GPSDL_IOC_CWDSP_MVCD_FRAGMENT	26
++#define GPSDL_IOC_GET_BOOT_TIME		28
++#define GPSDL_IOC_GET_PLATFORM_CLOCK	30
++
++struct gpsdl_bootup_info {
++	u32 code_size;
++	u32 start_addr;
++	u32 exec_addr;
++	u32 cipher_key;
++	u32 frag_num;
++};
++
++struct gpsdl_boot_time {
++	s64 now_time;
++	s64 arch_counter;
++};
++
++struct gpsdl;
++
++struct gpsdl_ring {
++	u32 base;		/* offset in the EMI region */
++	u32 r, w;		/* byte indices, software only */
++	bool dma;		/* a DMA transfer is in flight */
++	u32 dma_start;		/* index the transfer started at */
++	u32 dma_len;		/* bytes it may move */
++};
++
++struct gpsdl_link {
++	struct gpsdl *g;
++	int id;
++	struct device *dev;	/* /dev/gpsdlN */
++	int irq_da, irq_nd, irq_mb;
++	bool da_masked, nd_masked, mb_masked;
++
++	enum gpsdl_link_state state;
++	enum gpsdl_dsp_state dsp;
++	bool user_open;
++	bool active;		/* interrupts and DMA may run */
++	bool ready_to_write;	/* the DSP finished its reset */
++	bool need_clk_ext;
++	bool rx_pending;	/* data waits in the DSP, no room in the ring */
++	bool reset_pending;
++
++	struct gpsdl_ring tx, rx;
++	wait_queue_head_t wq_read, wq_write;
++};
++
++struct gpsdl {
++	struct device *dev;
++	struct mtk_conninfra *ci;
++	void __iomem *gps;	/* CONN_GPS */
++	void __iomem *dummy_cr;	/* MD blanking flag */
++	void __iomem *tia_rc_sel;
++	void __iomem *md_status;
++	void __iomem *emi;	/* the GNSS EMI region */
++	phys_addr_t emi_phys;
++	u32 emi_size;
++	int irq_dma;
++	bool dma_masked;
++
++	struct mutex lock;	/* everything below and the rings: one thread at a time */
++	struct gpsdl_link link[2];
++	bool conn_on;		/* CONNINFRA powered for GNSS */
++	bool common_on;		/* GNSS common part on */
++	u32 emi_users;		/* DMA channels using the EMI */
++	u32 adie;
++	unsigned int clock_flag;
++	struct wakeup_source *ws;
++
++	struct class *class;
++	dev_t devt;
++	struct cdev cdev;
++	struct miscdevice emi_dev, pwr_dev, scp_dev;
++};
++
++static struct gpsdl *gpsdl_of_misc(struct file *f);
++
++/* ---- SMC -------------------------------------------------------------- */
++
++static unsigned long gpsdl_smc(u32 opid, unsigned long x2, unsigned long x3,
++			       unsigned long x4, unsigned long x5,
++			       unsigned long x6, unsigned long x7,
++			       struct arm_smccc_res *res)
++{
++	struct arm_smccc_res r;
++
++	arm_smccc_smc(MTK_SIP_GPS_CONTROL, opid, x2, x3, x4, x5, x6, x7, &r);
++	if (res)
++		*res = r;
++	return r.a0;
++}
++
++#define smc0(op)		gpsdl_smc(op, 0, 0, 0, 0, 0, 0, NULL)
++#define smc1(op, a)		gpsdl_smc(op, a, 0, 0, 0, 0, 0, NULL)
++#define smc2(op, a, b)		gpsdl_smc(op, a, b, 0, 0, 0, 0, NULL)
++#define smc4(op, a, b, c, d)	gpsdl_smc(op, a, b, c, d, 0, 0, NULL)
++
++/* ---- rings ------------------------------------------------------------ */
++
++static u32 ring_data(const struct gpsdl_ring *r)
++{
++	return r->w >= r->r ? r->w - r->r : RING_SIZE + r->w - r->r;
++}
++
++static u32 ring_free(const struct gpsdl_ring *r)
++{
++	return RING_SIZE - 1 - ring_data(r);
++}
++
++static void ring_reset(struct gpsdl_ring *r)
++{
++	r->r = r->w = 0;
++	r->dma = false;
++}
++
++/* DMA channel of a ring: 0 L1 TX, 1 L1 RX, 2 L5 TX, 3 L5 RX */
++static int tx_chan(const struct gpsdl_link *l) { return l->id * 2; }
++static int rx_chan(const struct gpsdl_link *l) { return l->id * 2 + 1; }
++
++/* ---- EMI usage: the firmware is told while any DMA channel runs -------- */
++
++static void gpsdl_emi_claim(struct gpsdl *g, int chan)
++{
++	if (!g->emi_users)
++		smc2(OP_SW_REQUEST_EMI_USAGE, 1, 0);
++	g->emi_users |= BIT(chan);
++}
++
++static void gpsdl_emi_release(struct gpsdl *g, int chan)
++{
++	g->emi_users &= ~BIT(chan);
++	if (!g->emi_users)
++		smc2(OP_SW_REQUEST_EMI_USAGE, 0, 0);
++}
++
++/* ---- interrupt masks (depth kept balanced with our own flags) -------- */
++
++static void irq_mask(int irq, bool *masked)
++{
++	if (!*masked) {
++		disable_irq_nosync(irq);
++		*masked = true;
++	}
++}
++
++static void irq_unmask(int irq, bool *masked)
++{
++	if (*masked) {
++		enable_irq(irq);
++		*masked = false;
++	}
++}
++
++/* ---- TX --------------------------------------------------------------- */
++
++/* with the lock: start the TX DMA for whatever is in the ring */
++static void gpsdl_tx_start(struct gpsdl_link *l)
++{
++	struct gpsdl *g = l->g;
++	struct gpsdl_ring *t = &l->tx;
++	u32 n = ring_data(t);
++
++	if (!l->active || !l->ready_to_write || t->dma || !n)
++		return;
++	if (!smc1(OP_POLL_USRT_DSP_RX_EMPTY, l->id)) {
++		dev_warn(g->dev, "link %d: DSP RX not empty, TX deferred\n", l->id);
++		return;
++	}
++	/* the firmware counts words; the data was padded to words */
++	gpsdl_emi_claim(g, tx_chan(l));
++	t->dma = true;
++	t->dma_start = t->r;
++	t->dma_len = n;
++	gpsdl_smc(OP_SET_DMA_START, tx_chan(l), t->r, tx_chan(l),
++		  (RING_SIZE - t->r) / 4, n / 4, 0, NULL);
++}
++
++static void gpsdl_tx_done(struct gpsdl_link *l)
++{
++	struct gpsdl_ring *t = &l->tx;
++
++	if (!t->dma)
++		return;
++	t->dma = false;
++	t->r = (t->dma_start + t->dma_len) % RING_SIZE;
++	gpsdl_emi_release(l->g, tx_chan(l));
++	wake_up_interruptible(&l->wq_write);
++	gpsdl_tx_start(l);
++}
++
++/* ---- RX --------------------------------------------------------------- */
++
++/* with the lock: the DSP has data, move up to 512 bytes into the ring */
++static void gpsdl_rx_start(struct gpsdl_link *l)
++{
++	struct gpsdl *g = l->g;
++	struct gpsdl_ring *x = &l->rx;
++	u32 n = min_t(u32, ring_free(x), RX_TRANSFER_MAX);
++
++	if (!l->active || x->dma)
++		return;
++	if (n < 4) {
++		/* no room: the data waits in the DSP until a read makes room */
++		l->rx_pending = true;
++		return;
++	}
++	n &= ~3;
++	l->rx_pending = false;
++	gpsdl_emi_claim(g, rx_chan(l));
++	x->dma = true;
++	x->dma_start = x->w;
++	x->dma_len = n;
++	gpsdl_smc(OP_SET_DMA_START, rx_chan(l), x->w, rx_chan(l),
++		  (RING_SIZE - x->w) / 4, n / 4, 0, NULL);
++}
++
++/* with the lock: the transfer ended with @got bytes in the ring */
++static void gpsdl_rx_commit(struct gpsdl_link *l, u32 got)
++{
++	struct gpsdl_ring *x = &l->rx;
++
++	x->dma = false;
++	x->w = (x->dma_start + got) % RING_SIZE;
++	gpsdl_emi_release(l->g, rx_chan(l));
++	if (got)
++		wake_up_interruptible(&l->wq_read);
++}
++
++/* the window filled: the whole transfer is data */
++static void gpsdl_rx_done(struct gpsdl_link *l)
++{
++	if (!l->rx.dma)
++		return;
++	gpsdl_rx_commit(l, l->rx.dma_len);
++	if (smc1(OP_USRT_HAS_SET_NODATA_FLAG, l->id))
++		smc1(OP_USRT_CLEAR_NODATA_IRQ, l->id);
++	irq_unmask(l->irq_da, &l->da_masked);
++}
++
++/* the DSP said "no more data": what the DMA has not moved yet is not data */
++static void gpsdl_rx_nodata(struct gpsdl_link *l)
++{
++	struct gpsdl_ring *x = &l->rx;
++	u32 left, got;
++
++	if (x->dma) {
++		left = smc1(OP_GET_DMA_LEFT_LEN, rx_chan(l)) * 4;
++		/* the stop must follow the length read */
++		smc1(OP_SET_DMA_STOP, rx_chan(l));
++		got = left < x->dma_len ? x->dma_len - left : 0;
++		gpsdl_rx_commit(l, got);
++	}
++	smc1(OP_USRT_CLEAR_NODATA_IRQ, l->id);
++	irq_unmask(l->irq_nd, &l->nd_masked);
++	irq_unmask(l->irq_da, &l->da_masked);
++}
++
++/* ---- the DSP state machine and the mailbox ----------------------------- */
++
++static void gpsdl_dsp_working(struct gpsdl_link *l)
++{
++	struct gpsdl_link *o = &l->g->link[!l->id];
++
++	l->dsp = DSP_WORKING;
++	l->need_clk_ext = false;
++	if (o->dsp != DSP_WAKEN_UP && o->dsp != DSP_HW_STOP)
++		smc4(OP_PWR_STAT_CTRL,
++		     l->id ? DSP_L5_CLEAR_PWR_STAT : DSP_L1_CLEAR_PWR_STAT,
++		     l->g->link[0].need_clk_ext, 0, 0);
++}
++
++/* with the lock: drain the D2A mailbox; false when the DSP is dead */
++static bool gpsdl_mailbox(struct gpsdl_link *l)
++{
++	struct gpsdl *g = l->g;
++	struct arm_smccc_res res;
++	u32 flag, d1;
++	int n;
++
++	for (n = 0; n < 16; n++) {
++		if (gpsdl_smc(OP_GET_MCUB_INFO, l->id, 0, 0, 0, 0, 0, &res))
++			return false;
++		flag = res.a1;
++		d1 = res.a3;
++		if (!flag)
++			return true;
++		if ((flag & D2A_DEAD_MASK) == D2A_DEAD) {
++			dev_err(g->dev, "link %d: DSP assert 0x%x (0x%lx 0x%lx)\n",
++				l->id, flag, res.a2, res.a3);
++			return false;
++		}
++		smc2(OP_CLEAR_MCUB_D2A_FLAG, l->id, flag);
++		if (flag & D2A_RESET_DONE) {
++			dev_dbg(g->dev, "link %d: DSP reset done\n", l->id);
++			l->dsp = DSP_RESET_DONE;
++			l->ready_to_write = true;
++			gpsdl_tx_start(l);
++		}
++		if (flag & D2A_RAMCODE_READY) {
++			if (d1 == 0xdead || d1 == 0xbeef)
++				dev_err(g->dev, "link %d: RAM code error 0x%x\n",
++					l->id, d1);
++			else if (l->dsp != DSP_WORKING)
++				gpsdl_dsp_working(l);
++		}
++		/* REG_READ_READY: only the downstream debug register dump */
++	}
++	return true;
++}
++
++/* ---- interrupts (threaded, nothing in hard irq context) ---------------- */
++
++static irqreturn_t gpsdl_irq_da(int irq, void *data)
++{
++	struct gpsdl_link *l = data;
++
++	mutex_lock(&l->g->lock);
++	irq_mask(irq, &l->da_masked);
++	if (l->active)
++		gpsdl_rx_start(l);
++	else
++		irq_unmask(irq, &l->da_masked);
++	/* a transfer in flight keeps the line masked until it ends */
++	mutex_unlock(&l->g->lock);
++	return IRQ_HANDLED;
++}
++
++static irqreturn_t gpsdl_irq_nd(int irq, void *data)
++{
++	struct gpsdl_link *l = data;
++
++	mutex_lock(&l->g->lock);
++	irq_mask(irq, &l->nd_masked);
++	if (l->active)
++		gpsdl_rx_nodata(l);
++	else
++		irq_unmask(irq, &l->nd_masked);
++	mutex_unlock(&l->g->lock);
++	return IRQ_HANDLED;
++}
++
++static irqreturn_t gpsdl_irq_mb(int irq, void *data)
++{
++	struct gpsdl_link *l = data;
++
++	mutex_lock(&l->g->lock);
++	irq_mask(irq, &l->mb_masked);
++	if (l->active && gpsdl_mailbox(l))
++		irq_unmask(irq, &l->mb_masked);
++	else if (!l->active)
++		irq_unmask(irq, &l->mb_masked);
++	else
++		l->reset_pending = true;	/* left masked: the DSP is gone */
++	mutex_unlock(&l->g->lock);
++	return IRQ_HANDLED;
++}
++
++static irqreturn_t gpsdl_irq_dma(int irq, void *data)
++{
++	struct gpsdl *g = data;
++	int ch;
++
++	mutex_lock(&g->lock);
++	for (ch = 0; ch < 4; ch++) {
++		struct gpsdl_link *l = &g->link[ch / 2];
++
++		if (!smc1(OP_GET_DMA_INT_STATUS, ch))
++			continue;
++		smc1(OP_SET_DMA_STOP, ch);
++		if (ch & 1)
++			gpsdl_rx_done(l);
++		else
++			gpsdl_tx_done(l);
++	}
++	mutex_unlock(&g->lock);
++	return IRQ_HANDLED;
++}
++
++/* ---- power ------------------------------------------------------------ */
++
++static void gpsdl_link_irqs(struct gpsdl_link *l, bool on)
++{
++	if (on) {
++		irq_unmask(l->irq_da, &l->da_masked);
++		irq_unmask(l->irq_nd, &l->nd_masked);
++		gpsdl_mailbox(l);
++		irq_unmask(l->irq_mb, &l->mb_masked);
++	} else {
++		irq_mask(l->irq_mb, &l->mb_masked);
++		irq_mask(l->irq_da, &l->da_masked);
++		irq_mask(l->irq_nd, &l->nd_masked);
++	}
++}
++
++/* the first user: CONNINFRA, clock, TIA, the DMA interrupt */
++static int gpsdl_conn_on(struct gpsdl *g)
++{
++	int ret;
++
++	if (g->conn_on)
++		return 0;
++	ret = mtk_conninfra_radio_on(g->ci, MTK_CONNINFRA_GPS);
++	if (ret)
++		return ret;
++	g->clock_flag = mtk_conninfra_clock_schematic(g->ci);
++	/* the chip id register holds the id in the upper half (0x66378a01) */
++	g->adie = mtk_conninfra_adie_id(g->ci);
++	if (g->adie > 0xffff)
++		g->adie >>= 16;
++	__pm_stay_awake(g->ws);
++	if (g->tia_rc_sel)
++		writel(readl(g->tia_rc_sel) & ~TIA2_RC_SEL_CLEAR, g->tia_rc_sel);
++	irq_unmask(g->irq_dma, &g->dma_masked);
++	g->conn_on = true;
++	return 0;
++}
++
++static void gpsdl_conn_off(struct gpsdl *g)
++{
++	if (!g->conn_on)
++		return;
++	irq_mask(g->irq_dma, &g->dma_masked);
++	__pm_relax(g->ws);
++	mtk_conninfra_radio_off(g->ci, MTK_CONNINFRA_GPS);
++	g->conn_on = false;
++}
++
++static int gpsdl_common_on(struct gpsdl *g)
++{
++	struct arm_smccc_res res;
++	unsigned long ret;
++
++	if (g->common_on)
++		return 0;
++	udelay(200);
++	ret = gpsdl_smc(OP_COMMON_ON_PART1, 0, 0, 0, 0, 0, 0, &res);
++	if (ret == (unsigned long)-1) {
++		dev_err(g->dev, "common on part 1 failed\n");
++		return -EIO;
++	}
++	if (res.a1 != CONN_INFRA_VERSION_MT6878)
++		dev_warn(g->dev, "CONN_INFRA version 0x%lx, expected 0x%x\n",
++			 res.a1, CONN_INFRA_VERSION_MT6878);
++	smc1(OP_COMMON_ON_PART2, (g->emi_phys & 0xfffff0000ULL) >> 16);
++	smc1(OP_COMMON_ON_PART3, 1);
++	if (g->adie != 0x6637 && g->adie != 0x6635 && g->adie != 0x6631)
++		dev_warn(g->dev, "A-die 0x%x: only MT6637 class handled here\n",
++			 g->adie);
++	smc1(OP_SET_ADIE_CHIPID, g->adie);
++	g->emi_users = 0;
++	if (smc0(OP_COMMON_ON_PART4) == (unsigned long)-1) {
++		dev_err(g->dev, "common on part 4 failed\n");
++		smc0(OP_COMMON_ON_INNER_FAIL);
++		return -EIO;
++	}
++	if (smc0(OP_COMMON_ON_PART5) == (unsigned long)-1) {
++		dev_err(g->dev, "common on part 5 failed\n");
++		smc0(OP_COMMON_ON_FAIL);
++		return -EIO;
++	}
++	writel(1, g->dummy_cr);
++	g->common_on = true;
++	return 0;
++}
++
++static void gpsdl_common_off(struct gpsdl *g)
++{
++	if (!g->common_on)
++		return;
++	writel(0, g->dummy_cr);
++	smc0(OP_COMMON_OFF_PART1);
++	if (g->adie == 0x6637)
++		mtk_conninfra_spi_update_bits(g->ci, MTK_CONNINFRA_SPI_TOP,
++					      0xb18, BIT(1), 0);
++	if (smc0(OP_COMMON_OFF_PART2))
++		dev_err(g->dev, "common off part 2 failed (sleep protection)\n");
++	smc2(OP_SW_REQUEST_EMI_USAGE, 0, 0);
++	g->emi_users = 0;
++	smc0(OP_COMMON_OFF_PART3);
++	g->common_on = false;
++}
++
++static int gpsdl_dsp_on(struct gpsdl_link *l, bool resume)
++{
++	struct gpsdl *g = l->g;
++	unsigned int ctrl = resume ? (l->id ? DSP_L5_EXIT_DSTOP : DSP_L1_EXIT_DSTOP) :
++				     (l->id ? DSP_L5_ON : DSP_L1_ON);
++
++	smc4(OP_PWR_STAT_CTRL, ctrl, g->link[0].need_clk_ext, 0, 0);
++	if (!smc1(OP_DSP_ON_AND_POLL_ACK, l->id)) {
++		dev_err(g->dev, "link %d: DSP did not acknowledge power on\n", l->id);
++		return -EIO;
++	}
++	udelay(100);
++	smc4(OP_USRT_CTRL, l->id, 1, 1, 0);
++	return 0;
++}
++
++/* wait for the DSP's reset-done flag (downstream: 200 polls about 1 ms apart) */
++static bool gpsdl_wait_reset_done(struct gpsdl_link *l)
++{
++	int i;
++
++	if (l->dsp == DSP_RESET_DONE)
++		return true;
++	for (i = 0; i < 200; i++) {
++		usleep_range(999, 1001);
++		gpsdl_mailbox(l);
++		if (l->dsp == DSP_RESET_DONE)
++			return true;
++	}
++	dev_warn(l->g->dev, "link %d: DSP reset done not seen before off\n", l->id);
++	return false;
++}
++
++static int gpsdl_dsp_off(struct gpsdl_link *l, bool stop)
++{
++	struct gpsdl *g = l->g;
++	unsigned int ctrl = stop ? (l->id ? DSP_L5_ENTER_DSTOP : DSP_L1_ENTER_DSTOP) :
++				   (l->id ? DSP_L5_OFF : DSP_L1_OFF);
++	bool ok = gpsdl_wait_reset_done(l);
++	u32 v;
++
++	smc4(OP_USRT_CTRL, l->id, 0, 1, 0);
++	smc4(OP_PWR_STAT_CTRL, ctrl, g->link[0].need_clk_ext, 0, 0);
++	smc2(OP_CFG_DSP_MEM_AND_DSP_OFF, ctrl, l->id);
++	if (stop && readl_poll_timeout(g->gps + GPS_SLP_PWR_CTL(l->id), v,
++				       (v & 0xf) == 0xb, 100, 1000))
++		dev_warn(g->dev, "link %d: no deep stop ack (0x%08x)\n", l->id, v);
++	return ok ? 0 : -ETIMEDOUT;
++}
++
++/* the DMA engines must be idle before the DSP goes away */
++static void gpsdl_confirm_dma_stop(struct gpsdl_link *l)
++{
++	int i;
++
++	for (i = 0; i < 50 && l->tx.dma; i++)
++		usleep_range(100, 150);
++	if (l->tx.dma) {
++		smc1(OP_SET_DMA_STOP, tx_chan(l));
++		l->tx.dma = false;
++		gpsdl_emi_release(l->g, tx_chan(l));
++	}
++	for (i = 0; i < 50 && l->rx.dma; i++)
++		usleep_range(100, 150);
++	if (l->rx.dma) {
++		smc1(OP_SET_DMA_STOP, rx_chan(l));
++		l->rx.dma = false;
++		gpsdl_emi_release(l->g, rx_chan(l));
++	}
++}
++
++/* with the lock: the open sequence of a link */
++static int gpsdl_link_open(struct gpsdl_link *l)
++{
++	struct gpsdl *g = l->g;
++	struct gpsdl_link *o = &g->link[!l->id];
++	bool first = o->state != LINK_OPENED && o->state != LINK_SUSPENDED;
++	int ret;
++
++	if (first)
++		smc2(OP_COMMON_ON_SET_FLAG, COMMON_ON_MAGIC, 1);
++	ret = gpsdl_conn_on(g);
++	if (ret)
++		goto fail_flag;
++
++	smc1(OP_WAKEUP_CONNINFRA_TOP_OFF, 1);
++	ret = gpsdl_common_on(g);
++	if (!ret)
++		ret = gpsdl_dsp_on(l, false);
++	smc1(OP_WAKEUP_CONNINFRA_TOP_OFF, 0);
++	if (ret)
++		goto fail_conn;
++
++	ring_reset(&l->tx);
++	ring_reset(&l->rx);
++	l->dsp = DSP_TURNED_ON;
++	l->ready_to_write = false;
++	l->rx_pending = false;
++	l->reset_pending = false;
++	l->active = true;
++	gpsdl_link_irqs(l, true);
++	l->state = LINK_OPENED;
++	dev_info(g->dev, "link %d on (A-die 0x%x, clock 0x%x)\n", l->id, g->adie,
++		 g->clock_flag);
++	return 0;
++
++fail_conn:
++	if (first) {
++		gpsdl_common_off(g);
++		gpsdl_conn_off(g);
++	}
++fail_flag:
++	if (first)
++		smc2(OP_COMMON_ON_SET_FLAG, COMMON_ON_MAGIC, 0);
++	return ret;
++}
++
++/* with the lock: close or deep stop a link */
++static int gpsdl_link_close(struct gpsdl_link *l, bool stop)
++{
++	struct gpsdl *g = l->g;
++	struct gpsdl_link *o = &g->link[!l->id];
++	bool last;
++	int ret;
++
++	l->ready_to_write = false;
++	gpsdl_confirm_dma_stop(l);
++	gpsdl_link_irqs(l, false);
++	l->active = false;
++	wake_up_interruptible(&l->wq_write);
++
++	smc1(OP_WAKEUP_CONNINFRA_TOP_OFF, 1);
++	ret = gpsdl_dsp_off(l, stop);
++	if (stop) {
++		l->dsp = DSP_HW_STOP;
++		if (o->dsp == DSP_HW_STOP || o->dsp == DSP_OFF)
++			smc0(OP_COMMON_ENTER_DPSTOP);
++	} else {
++		l->dsp = DSP_OFF;
++		last = o->dsp == DSP_OFF;
++		if (last)
++			gpsdl_common_off(g);
++	}
++	smc1(OP_WAKEUP_CONNINFRA_TOP_OFF, 0);
++
++	ring_reset(&l->tx);
++	ring_reset(&l->rx);
++	if (stop) {
++		l->state = LINK_SUSPENDED;
++		if (o->dsp == DSP_HW_STOP || o->dsp == DSP_OFF)
++			__pm_relax(g->ws);
++		return ret;
++	}
++	last = o->state != LINK_OPENED && o->state != LINK_SUSPENDED;
++	if (last) {
++		gpsdl_conn_off(g);
++		smc2(OP_COMMON_ON_SET_FLAG, COMMON_ON_MAGIC, 0);
++	}
++	l->state = LINK_CLOSED;
++	dev_info(g->dev, "link %d off\n", l->id);
++	return ret;
++}
++
++/* with the lock: leave deep stop */
++static int gpsdl_link_resume(struct gpsdl_link *l)
++{
++	struct gpsdl *g = l->g;
++	struct gpsdl_link *o = &g->link[!l->id];
++	bool first = o->dsp != DSP_WAKEN_UP && o->dsp != DSP_WORKING &&
++		     o->dsp != DSP_RESET_DONE;
++	u32 v;
++	int ret;
++
++	__pm_stay_awake(g->ws);
++	smc1(OP_WAKEUP_CONNINFRA_TOP_OFF, 1);
++	if (first) {
++		smc0(OP_COMMON_LEAVE_DPSTOP);
++		if (readl_poll_timeout(g->gps + GPS_BGF_IP_VERSION, v,
++				       v == 0x02060000 || v == 0x02080000 ||
++				       v == 0x02090000, 100, 5000))
++			dev_warn(g->dev, "BGF IP version 0x%08x after deep stop\n", v);
++		if (readl_poll_timeout(g->gps + GPS_BGF_IP_CONFIG, v, !(v & 0xff),
++				       100, 1000))
++			dev_warn(g->dev, "BGF IP config 0x%08x after deep stop\n", v);
++		if (readl_poll_timeout(g->gps + GPS_TOP_OFF_PWR_CTL, v, (v & 0xf) == 2,
++				       100, 3000))
++			dev_warn(g->dev, "GPS top power 0x%08x after deep stop\n", v);
++		smc0(OP_COMMON_LEAVE_DPSTOP2);
++		smc0(OP_COMMON_ENABLE_ADIE);
++		smc0(OP_COMMON_ON_PART5);
++	}
++	ret = gpsdl_dsp_on(l, true);
++	if (!ret && o->dsp != DSP_HW_STOP)
++		smc0(OP_COMMON_CLEAR_WAKEUP_SOURCE);
++	smc1(OP_WAKEUP_CONNINFRA_TOP_OFF, 0);
++	if (ret)
++		return ret;
++	l->dsp = DSP_WAKEN_UP;
++	l->active = true;
++	gpsdl_link_irqs(l, true);
++	l->state = LINK_OPENED;
++	return 0;
++}
++
++/* ---- /dev/gpsdlN ------------------------------------------------------- */
++
++static int gpsdl_open(struct inode *inode, struct file *file)
++{
++	struct gpsdl *g = container_of(inode->i_cdev, struct gpsdl, cdev);
++	struct gpsdl_link *l;
++	int ret = 0;
++
++	if (iminor(inode) > 1)
++		return -ENODEV;
++	l = &g->link[iminor(inode)];
++	mutex_lock(&g->lock);
++	if (l->user_open) {
++		ret = -EBUSY;
++	} else if (l->state == LINK_SUSPENDED) {
++		ret = -EAGAIN;
++	} else if (l->state == LINK_RESET_DONE) {
++		ret = -EBUSY;
++	} else {
++		ret = gpsdl_link_open(l);
++		if (!ret) {
++			l->user_open = true;
++			file->private_data = l;
++		}
++	}
++	mutex_unlock(&g->lock);
++	return ret;
++}
++
++static int gpsdl_release(struct inode *inode, struct file *file)
++{
++	struct gpsdl_link *l = file->private_data;
++	struct gpsdl *g = l->g;
++
++	mutex_lock(&g->lock);
++	if (l->state == LINK_OPENED || l->state == LINK_SUSPENDED) {
++		if (l->state == LINK_SUSPENDED)
++			gpsdl_link_resume(l);
++		gpsdl_link_close(l, false);
++	}
++	l->state = LINK_CLOSED;
++	l->user_open = false;
++	mutex_unlock(&g->lock);
++	return 0;
++}
++
++static ssize_t gpsdl_read(struct file *file, char __user *buf, size_t count,
++			  loff_t *ppos)
++{
++	struct gpsdl_link *l = file->private_data;
++	struct gpsdl *g = l->g;
++	struct gpsdl_ring *x = &l->rx;
++	u8 tmp[RX_TRANSFER_MAX];
++	u32 n, first;
++	int ret;
++
++	if (!count)
++		return 0;
++	for (;;) {
++		mutex_lock(&g->lock);
++		if (l->state == LINK_RESET_DONE) {
++			mutex_unlock(&g->lock);
++			return -EFAULT;
++		}
++		n = ring_data(x);
++		if (n)
++			break;
++		mutex_unlock(&g->lock);
++		ret = wait_event_interruptible(l->wq_read, ring_data(&l->rx) ||
++					       l->state == LINK_RESET_DONE);
++		if (ret)
++			return ret;
++	}
++	n = min3(n, (u32)count, (u32)sizeof(tmp));
++	first = min(n, RING_SIZE - x->r);
++	memcpy_fromio(tmp, g->emi + x->base + x->r, first);
++	if (first < n)
++		memcpy_fromio(tmp + first, g->emi + x->base, n - first);
++	x->r = (x->r + n) % RING_SIZE;
++	/* room again: fetch what waited in the DSP */
++	if (l->rx_pending && l->active)
++		gpsdl_rx_start(l);
++	mutex_unlock(&g->lock);
++
++	if (copy_to_user(buf, tmp, n))
++		return -EFAULT;
++	return n;
++}
++
++static ssize_t gpsdl_write(struct file *file, const char __user *buf,
++			   size_t count, loff_t *ppos)
++{
++	struct gpsdl_link *l = file->private_data;
++	struct gpsdl *g = l->g;
++	struct gpsdl_ring *t = &l->tx;
++	u8 *tmp;
++	u32 n, padded, first;
++	int ret;
++
++	n = min_t(size_t, count, WRITE_MAX);
++	if (!n)
++		return 0;
++	/* the USRT moves words: pad with zeros as the downstream driver does */
++	padded = ALIGN(n, 4);
++	tmp = kzalloc(padded, GFP_KERNEL);
++	if (!tmp)
++		return -ENOMEM;
++	if (copy_from_user(tmp, buf, n)) {
++		kfree(tmp);
++		return -EFAULT;
++	}
++
++	for (;;) {
++		mutex_lock(&g->lock);
++		if (l->state != LINK_OPENED) {
++			mutex_unlock(&g->lock);
++			kfree(tmp);
++			return -EBUSY;
++		}
++		/* one transfer at a time, as the downstream single entry */
++		if (!t->dma && ring_free(t) > padded)
++			break;
++		mutex_unlock(&g->lock);
++		ret = wait_event_interruptible(l->wq_write,
++					       l->state != LINK_OPENED ||
++					       (!l->tx.dma && ring_free(&l->tx) > padded));
++		if (ret) {
++			kfree(tmp);
++			return ret;
++		}
++	}
++	first = min(padded, RING_SIZE - t->w);
++	memcpy_toio(g->emi + t->base + t->w, tmp, first);
++	if (first < padded)
++		memcpy_toio(g->emi + t->base, tmp + first, padded - first);
++	wmb();	/* the data before the index the DMA will use */
++	t->w = (t->w + padded) % RING_SIZE;
++	gpsdl_tx_start(l);
++	mutex_unlock(&g->lock);
++	kfree(tmp);
++	return n;
++}
++
++static int gpsdl_bootup_info(struct gpsdl_link *l, unsigned long arg, int dsp)
++{
++	struct gpsdl_bootup_info info;
++	struct arm_smccc_res res;
++
++	gpsdl_smc(OP_MVCD_GET_DSP_BOOT_UP_INFO, dsp, 0, 0, 0, 0, 0, &res);
++	if (!res.a1)
++		return -EFAULT;
++	info.frag_num = res.a1 & 0xffff;
++	info.code_size = (res.a1 >> 16) & 0xffff;
++	info.start_addr = (res.a1 >> 32) & 0xffff;
++	info.exec_addr = (res.a1 >> 48) & 0xffff;
++	info.cipher_key = res.a2 & 0xffff;
++	return copy_to_user((void __user *)arg, &info, sizeof(info)) ? -EFAULT : 0;
++}
++
++static long gpsdl_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
++{
++	struct gpsdl_link *l = file->private_data;
++	struct gpsdl *g = l->g;
++	int ret = 0;
++
++	switch (cmd) {
++	case GPSDL_IOC_CO_CLOCK_FLAG:
++		return g->clock_flag;
++	case GPSDL_IOC_TRIGGER_ASSERT:
++		dev_warn(g->dev, "link %d: reset requested by user space (%lu)\n",
++			 l->id, arg);
++		mutex_lock(&g->lock);
++		if (l->state == LINK_OPENED) {
++			gpsdl_link_close(l, false);
++			l->state = LINK_RESET_DONE;
++			wake_up_interruptible(&l->wq_read);
++			wake_up_interruptible(&l->wq_write);
++		}
++		mutex_unlock(&g->lock);
++		return 0;
++	case GPSDL_IOC_QUERY_STATUS:
++		mutex_lock(&g->lock);
++		ret = l->state == LINK_RESET_DONE ? 889 : 0;
++		mutex_unlock(&g->lock);
++		return ret;
++	case GPSDL_IOC_HW_SUSPEND:
++		mutex_lock(&g->lock);
++		if (l->state != LINK_OPENED) {
++			ret = -EBUSY;
++		} else {
++			int i;
++
++			/* the DSP must be back at reset done first */
++			for (i = 0; i < (l->id ? 25 : 75) && l->dsp != DSP_RESET_DONE; i++) {
++				gpsdl_mailbox(l);
++				if (l->dsp == DSP_RESET_DONE)
++					break;
++				usleep_range(2000, 2200);
++			}
++			if (l->dsp != DSP_RESET_DONE && l->dsp != DSP_WAKEN_UP &&
++			    l->dsp != DSP_WORKING) {
++				ret = 0;
++			} else if (l->dsp != DSP_RESET_DONE) {
++				ret = -EBUSY;
++			} else {
++				l->need_clk_ext = arg == 1;
++				ret = gpsdl_link_close(l, true);
++			}
++		}
++		mutex_unlock(&g->lock);
++		return ret;
++	case GPSDL_IOC_HW_RESUME:
++		mutex_lock(&g->lock);
++		if (l->state != LINK_SUSPENDED)
++			ret = l->dsp == DSP_WAKEN_UP ? 0 : -EBUSY;
++		else
++			ret = gpsdl_link_resume(l);
++		mutex_unlock(&g->lock);
++		/* the downstream module answers -EINVAL to the MVCD variant (sic) */
++		return ret ?: (arg == 2 ? -EINVAL : 0);
++	case GPSDL_IOC_LISTEN_RST_EVT:
++		return -EINVAL;
++	case GPSDL_IOC_GET_MD_STATUS: {
++		u32 v = g->md_status ? readl(g->md_status) : 0;
++
++		return copy_to_user((void __user *)arg, &v, sizeof(v)) ? -EFAULT : 0;
++	}
++	case GPSDL_IOC_GET_DSP_BOOTUP_INFO:
++		return gpsdl_bootup_info(l, arg, l->id);
++	case GPSDL_IOC_GET_CWDSP_BOOTUP_INFO:
++		return gpsdl_bootup_info(l, arg, l->id + 2);
++	case GPSDL_IOC_DSP_MVCD_FRAGMENT:
++	case GPSDL_IOC_CWDSP_MVCD_FRAGMENT: {
++		struct arm_smccc_res res;
++
++		if (arg > 256)
++			return -EINVAL;
++		gpsdl_smc(OP_MVCD_SEND_DSP_FRAGMENT,
++			  cmd == GPSDL_IOC_DSP_MVCD_FRAGMENT ? l->id : l->id + 2,
++			  arg, 0, 0, 0, 0, &res);
++		return res.a1 == 1 ? -EFAULT : 0;
++	}
++	case GPSDL_IOC_GET_BOOT_TIME: {
++		struct gpsdl_boot_time t = {
++			.now_time = ktime_get_boottime_ns(),
++			.arch_counter = __arch_counter_get_cntvct(),
++		};
++
++		return copy_to_user((void __user *)arg, &t, sizeof(t)) ? -EFAULT : 0;
++	}
++	case GPSDL_IOC_GET_PLATFORM_CLOCK:
++		return -1;	/* no MT6685 regmap, as the factory device tree */
++	default:
++		return -EFAULT;
++	}
++}
++
++static const struct file_operations gpsdl_fops = {
++	.owner = THIS_MODULE,
++	.open = gpsdl_open,
++	.release = gpsdl_release,
++	.read = gpsdl_read,
++	.write = gpsdl_write,
++	.unlocked_ioctl = gpsdl_ioctl,
++	.compat_ioctl = compat_ptr_ioctl,
++};
++
++/* ---- gps_emi, gps_pwr, gps2scp ---------------------------------------- */
++
++static struct gpsdl *gpsdl_of_misc(struct file *f)
++{
++	struct miscdevice *m = f->private_data;
++	struct gpsdl *g;
++
++	g = dev_get_drvdata(m->parent);
++	return g;
++}
++
++/* the ICAP (ADC capture) buffer at the start of the GNSS EMI; no mmap */
++static ssize_t gps_emi_read(struct file *f, char __user *buf, size_t count,
++			    loff_t *ppos)
++{
++	struct gpsdl *g = gpsdl_of_misc(f);
++	u8 tmp[256];
++	size_t done = 0;
++
++	if (*ppos >= EMI_ICAP_SIZE)
++		return 0;
++	count = min_t(size_t, count, EMI_ICAP_SIZE - *ppos);
++	while (done < count) {
++		size_t n = min(count - done, sizeof(tmp));
++
++		memcpy_fromio(tmp, g->emi + *ppos + done, n);
++		if (copy_to_user(buf + done, tmp, n))
++			return -EFAULT;
++		done += n;
++	}
++	*ppos += done;
++	return done;
++}
++
++static long gps_emi_ioctl(struct file *f, unsigned int cmd, unsigned long arg)
++{
++	/* EMI_MEMORY_INIT, NVRAM_FILE_TO_MEM, NVRAM_MEM_TO_FILE, ADC_CAPTURE_ADDR_GET */
++	return cmd >= 1 && cmd <= 4 ? 0 : -EINVAL;
++}
++
++static const struct file_operations gps_emi_fops = {
++	.owner = THIS_MODULE,
++	.read = gps_emi_read,
++	.unlocked_ioctl = gps_emi_ioctl,
++	.compat_ioctl = compat_ptr_ioctl,
++	.llseek = default_llseek,
++};
++
++/*
++ * gps_pwr: the factory device tree node reports battery throttling levels; there is none
++ * here. One level 0 for the first read, then the reader waits for ever.
++ */
++static DECLARE_WAIT_QUEUE_HEAD(gps_pwr_wq);
++
++static ssize_t gps_pwr_read(struct file *f, char __user *buf, size_t count,
++			    loff_t *ppos)
++{
++	u32 level = 0;
++
++	if (*ppos)
++		return wait_event_interruptible(gps_pwr_wq, 0) ?: 0;
++	if (count < sizeof(level))
++		return -EINVAL;
++	if (copy_to_user(buf, &level, sizeof(level)))
++		return -EFAULT;
++	*ppos = sizeof(level);
++	return sizeof(level);
++}
++
++static __poll_t gps_pwr_poll(struct file *f, poll_table *wait)
++{
++	poll_wait(f, &gps_pwr_wq, wait);
++	return 0;
++}
++
++static long gps_pwr_ioctl(struct file *f, unsigned int cmd, unsigned long arg)
++{
++	return 0;
++}
++
++static const struct file_operations gps_pwr_fops = {
++	.owner = THIS_MODULE,
++	.read = gps_pwr_read,
++	.poll = gps_pwr_poll,
++	.unlocked_ioctl = gps_pwr_ioctl,
++	.compat_ioctl = compat_ptr_ioctl,
++};
++
++/* gps2scp: the SCP is not running here; the downstream open fails the same way */
++static int gps2scp_open(struct inode *inode, struct file *f)
++{
++	return -EAGAIN;
++}
++
++static const struct file_operations gps2scp_fops = {
++	.owner = THIS_MODULE,
++	.open = gps2scp_open,
++};
++
++/* ---- probe ------------------------------------------------------------- */
++
++static int gpsdl_request_irqs(struct gpsdl *g, struct platform_device *pdev)
++{
++	static const char * const names[] = {
++		"gps_da0", "gps_nd0", "gps_mb0", "gps_da1", "gps_nd1", "gps_mb1",
++	};
++	static irq_handler_t handlers[] = {
++		gpsdl_irq_da, gpsdl_irq_nd, gpsdl_irq_mb,
++	};
++	int i, irq, ret;
++
++	for (i = 0; i < 6; i++) {
++		struct gpsdl_link *l = &g->link[i / 3];
++
++		irq = platform_get_irq(pdev, i);
++		if (irq < 0)
++			return irq;
++		ret = devm_request_threaded_irq(g->dev, irq, NULL, handlers[i % 3],
++						IRQF_ONESHOT | IRQF_NO_AUTOEN,
++						names[i], l);
++		if (ret)
++			return ret;
++		switch (i % 3) {
++		case 0: l->irq_da = irq; l->da_masked = true; break;
++		case 1: l->irq_nd = irq; l->nd_masked = true; break;
++		default: l->irq_mb = irq; l->mb_masked = true; break;
++		}
++	}
++	irq = platform_get_irq(pdev, 6);
++	if (irq < 0)
++		return irq;
++	ret = devm_request_threaded_irq(g->dev, irq, NULL, gpsdl_irq_dma,
++					IRQF_ONESHOT | IRQF_NO_AUTOEN, "gps_dma", g);
++	if (ret)
++		return ret;
++	g->irq_dma = irq;
++	g->dma_masked = true;
++	return 0;
++}
++
++static void __iomem *gpsdl_map_byname(struct platform_device *pdev,
++				      const char *name, bool required)
++{
++	struct resource *res = platform_get_resource_byname(pdev, IORESOURCE_MEM, name);
++
++	if (!res)
++		return required ? ERR_PTR(-EINVAL) : NULL;
++	/* the CONNSYS windows are shared with CONNINFRA and the radios */
++	return devm_ioremap(&pdev->dev, res->start, resource_size(res)) ?: ERR_PTR(-ENOMEM);
++}
++
++static void gpsdl_remove_misc(void *data)
++{
++	misc_deregister(data);
++}
++
++static void gpsdl_put_wakeup_source(void *data)
++{
++	wakeup_source_unregister(data);
++}
++
++static void gpsdl_put_class(void *data)
++{
++	struct gpsdl *g = data;
++
++	device_destroy(g->class, MKDEV(MAJOR(g->devt), 1));
++	device_destroy(g->class, MKDEV(MAJOR(g->devt), 0));
++	cdev_del(&g->cdev);
++	class_destroy(g->class);
++	unregister_chrdev_region(g->devt, 2);
++}
++
++static int gpsdl_probe(struct platform_device *pdev)
++{
++	struct device *dev = &pdev->dev;
++	struct gpsdl *g;
++	u64 emi;
++	u32 size, md;
++	int i, ret;
++
++	g = devm_kzalloc(dev, sizeof(*g), GFP_KERNEL);
++	if (!g)
++		return -ENOMEM;
++	g->dev = dev;
++	platform_set_drvdata(pdev, g);
++	mutex_init(&g->lock);
++	for (i = 0; i < 2; i++) {
++		g->link[i].g = g;
++		g->link[i].id = i;
++		g->link[i].tx.base = EMI_TX_RING(i);
++		g->link[i].rx.base = EMI_RX_RING(i);
++		init_waitqueue_head(&g->link[i].wq_read);
++		init_waitqueue_head(&g->link[i].wq_write);
++	}
++
++	g->ci = devm_mtk_conninfra_get(dev);
++	if (IS_ERR(g->ci))
++		return dev_err_probe(dev, PTR_ERR(g->ci), "failed to get CONNINFRA\n");
++
++	g->gps = gpsdl_map_byname(pdev, "conn_gps_base", true);
++	if (IS_ERR(g->gps))
++		return PTR_ERR(g->gps);
++	g->dummy_cr = gpsdl_map_byname(pdev, "status_dummy_cr", true);
++	if (IS_ERR(g->dummy_cr))
++		return PTR_ERR(g->dummy_cr);
++	g->tia_rc_sel = gpsdl_map_byname(pdev, "tia2_gps_rc_sel", false);
++	if (IS_ERR(g->tia_rc_sel))
++		return PTR_ERR(g->tia_rc_sel);
++	if (!of_property_read_u32(dev->of_node, "b13b14-status-addr", &md))
++		g->md_status = devm_ioremap(dev, md, 4);
++
++	/*
++	 * The GNSS EMI: the boot loader writes "emi-addr" into this node on
++	 * the factory DTB. When the mainline DTB got no such property, it
++	 * follows the CONNSYS EMI, as the factory layout has it.
++	 */
++	if (of_property_read_u32(dev->of_node, "emi-size", &size) || !size)
++		return dev_err_probe(dev, -EINVAL, "no emi-size\n");
++	if (of_property_read_u64(dev->of_node, "emi-addr", &emi) || !emi) {
++		phys_addr_t cbase;
++		u32 csize;
++
++		if (mtk_conninfra_get_emi(g->ci, &cbase, &csize))
++			return dev_err_probe(dev, -ENOENT,
++					     "no GNSS EMI (emi-addr from the boot loader)\n");
++		emi = cbase + csize;
++		dev_info(dev, "GNSS EMI after the CONNSYS EMI: %pa\n", &emi);
++	}
++	if (size < EMI_USED)
++		return dev_err_probe(dev, -EINVAL, "GNSS EMI too small (0x%x)\n", size);
++	g->emi_phys = emi;
++	g->emi_size = size;
++	g->emi = devm_ioremap(dev, emi, size);
++	if (!g->emi)
++		return -ENOMEM;
++
++	ret = gpsdl_request_irqs(g, pdev);
++	if (ret)
++		return dev_err_probe(dev, ret, "interrupts\n");
++
++	g->ws = wakeup_source_register(dev, "gpsdl");
++	if (!g->ws)
++		return -ENOMEM;
++	ret = devm_add_action_or_reset(dev, gpsdl_put_wakeup_source, g->ws);
++	if (ret)
++		return ret;
++
++	/* /dev/gpsdl0, /dev/gpsdl1 */
++	ret = alloc_chrdev_region(&g->devt, 0, 2, "gps_data_link_cdev");
++	if (ret)
++		return ret;
++	g->class = class_create("gpsdl");
++	if (IS_ERR(g->class)) {
++		unregister_chrdev_region(g->devt, 2);
++		return PTR_ERR(g->class);
++	}
++	cdev_init(&g->cdev, &gpsdl_fops);
++	ret = cdev_add(&g->cdev, g->devt, 2);
++	if (ret) {
++		class_destroy(g->class);
++		unregister_chrdev_region(g->devt, 2);
++		return ret;
++	}
++	for (i = 0; i < 2; i++) {
++		g->link[i].dev = device_create(g->class, dev, MKDEV(MAJOR(g->devt), i),
++					       NULL, "gpsdl%d", i);
++		if (IS_ERR(g->link[i].dev)) {
++			ret = PTR_ERR(g->link[i].dev);
++			if (i)
++				device_destroy(g->class, MKDEV(MAJOR(g->devt), 0));
++			cdev_del(&g->cdev);
++			class_destroy(g->class);
++			unregister_chrdev_region(g->devt, 2);
++			return ret;
++		}
++	}
++	ret = devm_add_action_or_reset(dev, gpsdl_put_class, g);
++	if (ret)
++		return ret;
++
++	g->emi_dev.minor = MISC_DYNAMIC_MINOR;
++	g->emi_dev.name = "gps_emi";
++	g->emi_dev.fops = &gps_emi_fops;
++	g->emi_dev.parent = dev;
++	g->pwr_dev.minor = MISC_DYNAMIC_MINOR;
++	g->pwr_dev.name = "gps_pwr";
++	g->pwr_dev.fops = &gps_pwr_fops;
++	g->pwr_dev.parent = dev;
++	g->scp_dev.minor = MISC_DYNAMIC_MINOR;
++	g->scp_dev.name = "gps2scp";
++	g->scp_dev.fops = &gps2scp_fops;
++	g->scp_dev.parent = dev;
++	ret = misc_register(&g->emi_dev);
++	if (ret)
++		return ret;
++	ret = devm_add_action_or_reset(dev, gpsdl_remove_misc, &g->emi_dev);
++	if (ret)
++		return ret;
++	ret = misc_register(&g->pwr_dev);
++	if (ret)
++		return ret;
++	ret = devm_add_action_or_reset(dev, gpsdl_remove_misc, &g->pwr_dev);
++	if (ret)
++		return ret;
++	ret = misc_register(&g->scp_dev);
++	if (ret)
++		return ret;
++	ret = devm_add_action_or_reset(dev, gpsdl_remove_misc, &g->scp_dev);
++	if (ret)
++		return ret;
++
++	dev_info(dev, "GNSS data link: EMI %pa (%u KiB), rings at 0x%x/0x%x\n",
++		 &g->emi_phys, size / 1024, EMI_TX_RING(0), EMI_RX_RING(0));
++	return 0;
++}
++
++static void gpsdl_remove(struct platform_device *pdev)
++{
++	struct gpsdl *g = platform_get_drvdata(pdev);
++	int i;
++
++	mutex_lock(&g->lock);
++	for (i = 0; i < 2; i++)
++		if (g->link[i].state == LINK_OPENED)
++			gpsdl_link_close(&g->link[i], false);
++	mutex_unlock(&g->lock);
++}
++
++static const struct of_device_id gpsdl_of_match[] = {
++	{ .compatible = "mediatek,mt6878-gps" },
++	{ /* sentinel */ }
++};
++MODULE_DEVICE_TABLE(of, gpsdl_of_match);
++
++static struct platform_driver gpsdl_driver = {
++	.probe = gpsdl_probe,
++	.remove = gpsdl_remove,
++	.driver = {
++		.name = "mtk-gps-dl",
++		.of_match_table = gpsdl_of_match,
++	},
++};
++module_platform_driver(gpsdl_driver);
++
++MODULE_DESCRIPTION("MediaTek MT6878 GNSS data link");
++MODULE_LICENSE("GPL");
+-- 
+2.56.0
+

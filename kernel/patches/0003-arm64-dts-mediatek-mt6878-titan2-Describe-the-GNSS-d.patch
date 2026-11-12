@@ -1,0 +1,74 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: serlk <22211586+Serlk@users.noreply.github.com>
+Date: Thu, 12 Nov 2026 18:23:44 +0300
+Subject: [PATCH 3/3] arm64: dts: mediatek: mt6878-titan2: Describe the GNSS
+ data link
+
+The /gps node of the wifi dtsi becomes the GNSS data link device, as in
+the factory device tree, and stays disabled; -all-fb (and so -all)
+enables it. The boot loader still finds it as /gps and writes its
+"emi-addr".
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../mt6878-unihertz-titan2-all-fb.dts         |  4 +++
+ .../mediatek/mt6878-unihertz-titan2-wifi.dtsi | 28 ++++++++++++++++++-
+ 2 files changed, 31 insertions(+), 1 deletion(-)
+
+diff --git a/arch/arm64/boot/dts/mediatek/mt6878-unihertz-titan2-all-fb.dts b/arch/arm64/boot/dts/mediatek/mt6878-unihertz-titan2-all-fb.dts
+index 8bb21f15ac1f..f8569646445e 100644
+--- a/arch/arm64/boot/dts/mediatek/mt6878-unihertz-titan2-all-fb.dts
++++ b/arch/arm64/boot/dts/mediatek/mt6878-unihertz-titan2-all-fb.dts
+@@ -32,3 +32,7 @@ &consys {
+ &{/bt@18800000} {
+ 	status = "okay";
+ };
++
++&{/gps@18c00000} {
++	status = "okay";
++};
+diff --git a/arch/arm64/boot/dts/mediatek/mt6878-unihertz-titan2-wifi.dtsi b/arch/arm64/boot/dts/mediatek/mt6878-unihertz-titan2-wifi.dtsi
+index f940999592f4..787714cfc403 100644
+--- a/arch/arm64/boot/dts/mediatek/mt6878-unihertz-titan2-wifi.dtsi
++++ b/arch/arm64/boot/dts/mediatek/mt6878-unihertz-titan2-wifi.dtsi
+@@ -175,10 +175,36 @@ / {
+ 	 * (0xc00000 + 0x100000 + 0x1400000), otherwise LK skips the SCP
+ 	 * remap. No driver binds to them.
+ 	 */
+-	gps {
++	/*
++	 * GNSS (the L1 and L5 DSPs of CONNSYS), as the factory device tree node: LK finds
++	 * it as /gps and writes "emi-addr" (the GNSS EMI after the CONNSYS
++	 * one). The windows are shared with CONNINFRA, Wi-Fi and BT. The
++	 * hardware is driven through the trusted firmware (SiP 0x537).
++	 */
++	gps@18c00000 {
++		compatible = "mediatek,mt6878-gps";
++		reg = <0 0x18c00000 0 0x100000>,
++		      <0 0x18000000 0 0x100000>,
++		      <0 0x1c000000 0 0x4>,
++		      <0 0x1c013058 0 0x4>,
++		      <0 0x1c013060 0 0x4>,
++		      <0 0x1c0130f8 0 0x28>;
++		reg-names = "conn_gps_base", "conn_infra_base", "status_dummy_cr",
++			    "tia2_gps_on", "tia2_gps_rc_sel", "tia2_gps_debug";
++		/* L1 data, L1 no data, L1 mailbox, L5 data, L5 no data, L5 mailbox, DMA */
++		interrupts = <GIC_SPI 379 IRQ_TYPE_LEVEL_HIGH 0>,
++			     <GIC_SPI 380 IRQ_TYPE_LEVEL_HIGH 0>,
++			     <GIC_SPI 381 IRQ_TYPE_LEVEL_HIGH 0>,
++			     <GIC_SPI 382 IRQ_TYPE_LEVEL_HIGH 0>,
++			     <GIC_SPI 383 IRQ_TYPE_LEVEL_HIGH 0>,
++			     <GIC_SPI 389 IRQ_TYPE_LEVEL_HIGH 0>,
++			     <GIC_SPI 129 IRQ_TYPE_LEVEL_HIGH 0>;
++		mediatek,conninfra = <&consys>;
++		b13b14-status-addr = <0x1c000008>;
+ 		emi-size = <0x100000>;
+ 		emi-alignment = <0x100000>;
+ 		emi-max-addr = <0xc0000000>;
++		status = "disabled";
+ 	};
+ 
+ 	connscp {
+-- 
+2.56.0
+

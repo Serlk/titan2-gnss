@@ -27,8 +27,9 @@ MediaTek EPO server, with a generic User-Agent.
   (branch `main`, `tools/titan2-vendor-runtime`, Alpine package from
   `tools/aports/titan2-vendor-runtime`) and **bionic_translation** with the patches in
   `tools/titan2-vendor-runtime/patches/bionic_translation` of that repository.
-- Kernel: [titan2-linux](https://github.com/Serlk/titan2-linux) branch `gnss`
-  (see [kernel/README.md](kernel/README.md); config fragment `kernel/titan2-gnss.config`).
+- Kernel: [titan2-linux](https://github.com/Serlk/titan2-linux) branch `titan2` with the
+  patches in `kernel/patches/` (`git am`; see [kernel/README.md](kernel/README.md)); config fragment
+  `kernel/titan2-gnss.config`.
 - GeoClue (Alpine `geoclue`), `curl` for the EPO download.
 
 ```
@@ -103,7 +104,8 @@ make                      # needs bionic_translation-dev
 make dist                 # tarballs for aports/titan2-gnss and aports/titan2-epo, then abuild checksum
 ```
 
-On the phone: kernel from titan2-linux branch `gnss`; `apk add titan2-gnss titan2-epo`; the
+On the phone: kernel from titan2-linux branch `titan2` with `kernel/patches/` and
+`kernel/titan2-gnss.config` (kernel/README.md); `apk add titan2-gnss titan2-epo`; the
 vendor root from your own partitions, e.g. mounted read-only under `/mnt/factory`:
 `t2-vendor-setup /mnt/factory /var/lib/titan2-vendor /usr/share/titan2-vendor-runtime/files.d/gnss.txt`
 (the GNSS list alone is enough); then `rc-service t2-mnld start; rc-service t2-gnss start`.
@@ -133,7 +135,7 @@ license in an `SPDX-License-Identifier` line (or in `REUSE.toml`); the AOSP head
 
 ## Related repositories
 
-- [titan2-linux](https://github.com/Serlk/titan2-linux): the kernel. Branch `titan2` is the mainline port; branches `camera`, `fingerprint` and `gnss` carry the optional camera, fingerprint and GNSS series on top of it.
+- [titan2-linux](https://github.com/Serlk/titan2-linux): the kernel, branch `titan2` (the mainline port). The optional camera, fingerprint and GNSS kernel parts are not in it: each lives as a patch series in `kernel/patches/` of its own repository below, applied with `git am` on `titan2`.
 - [titan2-boot](https://github.com/Serlk/titan2-boot): the boot menu in `boot_a` (Android and Linux side by side).
 - [titan2-tools](https://github.com/Serlk/titan2-tools): image builders, initramfs, network and disk root, modem, power and sensor services, and the shared `titan2-vendor-runtime`.
 - [titan2-docs](https://github.com/Serlk/titan2-docs): documentation and hardware notes.
