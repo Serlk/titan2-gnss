@@ -1,0 +1,30 @@
+# SPDX-License-Identifier: GPL-2.0-or-later
+# Copyright (C) 2026 serlk <22211586+Serlk@users.noreply.github.com>
+# Maintainer: serlk <22211586+Serlk@users.noreply.github.com>
+#
+# Titan 2 A-GPS: the open downloader of the MediaTek EPO predicted-ephemeris file
+# (t2-epo-fetch, OpenRC t2-epo, cron and NetworkManager hooks). The file is downloaded at
+# run time on the phone; it is never part of the package. Source: epo/ of this repository
+# (`make dist`, then `abuild checksum`).
+pkgname=titan2-epo
+pkgver=0.1
+pkgrel=1
+pkgdesc="Unihertz Titan 2 A-GPS: open MediaTek EPO ephemeris downloader for the GNSS stack"
+url="https://github.com/Serlk/titan2-gnss"
+arch="noarch"
+license="GPL-2.0-or-later"
+depends="curl openrc"
+options="!check"
+source="titan2-epo.tar.gz"
+builddir="$srcdir/epo"
+
+build() {
+	:
+}
+
+package() {
+	make DESTDIR="$pkgdir" PREFIX=/usr install
+}
+
+sha512sums="
+"

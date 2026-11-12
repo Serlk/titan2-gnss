@@ -1,0 +1,37 @@
+#!/sbin/openrc-run
+# SPDX-License-Identifier: GPL-2.0-or-later
+# Copyright (C) 2026 serlk <22211586+Serlk@users.noreply.github.com>
+#
+# Fetch the MediaTek EPO predicted-ephemeris file (A-GPS data) once the network
+# is up; t2-gnssd injects it into mnld. Later refreshes: the NetworkManager
+# dispatcher hook (every connection) and /etc/periodic/daily (cron), plus
+# t2-gnssd itself when the file is stale at a session start.
+description="Titan 2 A-GPS: fetch the MediaTek EPO ephemeris file (t2-epo-fetch)"
+
+: "${T2_EPO_DIR:=/var/lib/t2-gnss/epo}"
+
+depend() {
+	need net
+	after NetworkManager
+	before t2-gnss
+}
+
+start() {
+	ebegin "Fetching the EPO file in the background"
+	checkpath -d -m 0755 "$T2_EPO_DIR"
+	# never delay the boot on a slow link: run detached, t2-gnssd picks the file up when it lands
+	start-stop-daemon --start --background --exec /usr/bin/t2-epo-fetch -- -q
+	eend $?
+}
+
+stop() {
+	return 0
+}
+
+status() {
+	if [ -f "$T2_EPO_DIR/EPO.DAT" ]; then
+		einfo "EPO.DAT: $(cat "$T2_EPO_DIR/EPO.DAT.info" 2>/dev/null), $(( ($(date +%s) - $(stat -c %Y "$T2_EPO_DIR/EPO.DAT")) / 3600 )) h old"
+	else
+		ewarn "no $T2_EPO_DIR/EPO.DAT yet"
+	fi
+}

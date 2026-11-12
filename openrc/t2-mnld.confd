@@ -1,0 +1,14 @@
+# SPDX-License-Identifier: GPL-2.0-or-later
+# Copyright (C) 2026 serlk <22211586+Serlk@users.noreply.github.com>
+#
+# /etc/conf.d/t2-mnld: the MediaTek GNSS daemon mnld of the factory firmware in the vendor chroot
+# vendor root assembled by t2-vendor-setup (files.d/gnss.txt of titan2-gnss)
+#T2_VENDOR_ROOT=/var/lib/titan2-vendor
+# extra mnld arguments (factory init: none; meta mode uses "1Hz=y meta log_ctrl")
+#T2_MNLD_ARGS=""
+# mount the phone's nvdata/nvcfg partitions read-only into the chroot (GNSS co-clock
+# calibration, almanac): auto (default) or none
+#T2_MNLD_NVDATA=auto
+# also start mtk_agpsd (SUPL client; experimental — needs the modem channel and DNS
+# that the chroot does not provide)
+#T2_MNLD_AGPS=1

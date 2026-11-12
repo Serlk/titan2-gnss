@@ -1,0 +1,11 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-2.0-or-later
+# Copyright (C) 2026 serlk <22211586+Serlk@users.noreply.github.com>
+# /etc/NetworkManager/dispatcher.d/90-t2-epo: refresh the EPO file when a connection comes up
+case "$2" in
+up|connectivity-change)
+	[ "$2" = up ] || [ "${CONNECTIVITY_STATE:-}" = FULL ] || exit 0
+	/usr/bin/t2-epo-fetch -q >/dev/null 2>&1 &
+	;;
+esac
+exit 0

@@ -1,0 +1,32 @@
+# SPDX-License-Identifier: GPL-2.0-or-later
+# Copyright (C) 2026 serlk <22211586+Serlk@users.noreply.github.com>
+# Maintainer: serlk <22211586+Serlk@users.noreply.github.com>
+#
+# Titan 2 GNSS on mainline: the MediaTek navigation daemon mnld of the phone's own firmware
+# run natively in the vendor chroot (t2-mnld) and the bridge t2-gnssd (the vendor GPS HAL
+# in-process -> NMEA socket for GeoClue). Contains no vendor files. Source: this repository
+# (`make dist`, then `abuild checksum`).
+pkgname=titan2-gnss
+pkgver=0.3
+pkgrel=0
+pkgdesc="Unihertz Titan 2 GNSS: mnld in a bionic chroot, GPS HAL in-process, NMEA for GeoClue"
+url="https://github.com/Serlk/titan2-gnss"
+arch="aarch64"
+license="GPL-2.0-or-later"
+# titan2-epo fetches the EPO assistance file; geoclue reads the NMEA socket
+depends="titan2-vendor-runtime bionic_translation openrc geoclue"
+makedepends="titan2-vendor-runtime-dev bionic_translation-dev"
+options="!check"
+source="titan2-gnss.tar.gz"
+builddir="$srcdir/titan2-gnss"
+
+build() {
+	make VENDOR_RUNTIME=/usr/share/titan2-vendor-runtime/src
+}
+
+package() {
+	make VENDOR_RUNTIME=/usr/share/titan2-vendor-runtime/src DESTDIR="$pkgdir" PREFIX=/usr install
+}
+
+sha512sums="
+"

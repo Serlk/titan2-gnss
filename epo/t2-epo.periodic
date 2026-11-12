@@ -1,0 +1,5 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-2.0-or-later
+# Copyright (C) 2026 serlk <22211586+Serlk@users.noreply.github.com>
+# /etc/periodic/daily/t2-epo: refresh the EPO file (busybox crond)
+exec /usr/bin/t2-epo-fetch -q

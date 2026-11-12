@@ -1,0 +1,6 @@
+*.o
+/t2-gnssd
+/t2-initsock
+/aports/*/*.tar.gz
+__pycache__/
+*.pyc

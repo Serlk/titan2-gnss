@@ -1,0 +1,124 @@
+#!/sbin/openrc-run
+# SPDX-License-Identifier: GPL-2.0-or-later
+# Copyright (C) 2026 serlk <22211586+Serlk@users.noreply.github.com>
+#
+# MediaTek navigation daemon: the mnld of the factory firmware (bionic, closed) run natively in a
+# chroot of the vendor root built by t2-vendor-setup — the way t2-teed runs teed.
+# No container, no namespaces: mnld sees the real /dev (/dev/gpsdl0 of
+# mtk-gps-dl, gps_emi, gps_pwr, gps2scp), gets its Android properties from
+# t2-propd (chip ids, "driver ready", "nvram ready": t2-vendor-env), its logs go
+# to t2-logd (/var/log/t2-vendor/logcat.log), its init control socket
+# /dev/socket/mnld comes from t2-initsock. mnld loads the GNSS DSP code through
+# /dev/gpsdl0 itself; the Linux client of the vendor GPS HAL is t2-gnssd
+# (OpenRC t2-gnss). Optional: the SUPL daemon mtk_agpsd (T2_MNLD_AGPS=1).
+description="MediaTek GNSS daemon mnld (factory firmware, native in the vendor chroot)"
+
+: "${T2_VENDOR_ROOT:=/var/lib/titan2-vendor}"
+: "${T2_MNLD_ARGS:=}"
+: "${T2_MNLD_NVDATA:=auto}"
+: "${T2_MNLD_AGPS:=}"
+export T2_VENDOR_ROOT
+
+supervisor=supervise-daemon
+command=/usr/bin/t2-initsock
+command_args="mnld -- /usr/sbin/chroot $T2_VENDOR_ROOT /vendor/bin/mnld $T2_MNLD_ARGS"
+supervise_daemon_args="--env LD_LIBRARY_PATH=/vendor/lib64:/system/lib64:/vendor/lib64/hw --env ANDROID_DATA=/data --env ANDROID_ROOT=/system"
+respawn_delay=5
+respawn_max=0
+output_log=/var/log/t2-vendor/mnld.log
+error_log=/var/log/t2-vendor/mnld.log
+
+depend() {
+	need localmount
+	after modules t2-teed
+}
+
+mount_ro_part() {	# label mountpoint
+	local dev=/dev/disk/by-partlabel/$1
+	mkdir -p "$2"
+	mountpoint -q "$2" && return 0
+	[ -b "$dev" ] || { ewarn "no partition $1: $2 stays empty"; return 0; }
+	mount -o ro,noload "$dev" "$2" 2>/dev/null || mount -o ro "$dev" "$2" ||
+		ewarn "cannot mount $1 read-only on $2"
+}
+
+start_pre() {
+	local R=$T2_VENDOR_ROOT d i
+	[ -x "$R/vendor/bin/mnld" ] || {
+		eerror "$R has no vendor/bin/mnld (t2-vendor-setup with container/gnss-files.txt)"
+		return 1
+	}
+	# kernel side: mtk-gps-dl (the GNSS data link; conninfra comes with it)
+	modprobe mtk_gps_dl 2>/dev/null || modprobe mtk-gps-dl 2>/dev/null
+	i=0
+	while [ ! -c /dev/gpsdl0 ] && [ $i -lt 50 ]; do sleep 0.1; i=$((i + 1)); done
+	[ -c /dev/gpsdl0 ] || ewarn "no /dev/gpsdl0 (dmesg | grep mtk-gps-dl): mnld will not reach the receiver"
+	# the vendor chroot: binds, property service, log collector
+	t2-vendor-env up || return 1
+	# properties mnld reads instead of asking the kernel (chip and A-die id of the Titan 2);
+	# hwservicemanager.disabled: libhidl then returns at once instead of waiting for a
+	# HIDL sensor service that does not exist here (mnld's MPE/dead-reckoning helper)
+	t2-vendor-env prop persist.vendor.connsys.chipid 0x6878
+	t2-vendor-env prop vendor.connsys.gps.adie.chipid 0x6637
+	t2-vendor-env prop vendor.connsys.driver.ready yes
+	t2-vendor-env prop vendor.service.nvram_init Ready
+	t2-vendor-env prop hwservicemanager.disabled true
+	t2-vendor-env prop vendor.gpsdbglog.enable 0
+	# data directories of mnld and mtk_agpsd (as the factory init.connectivity.common.rc, mtk_agpsd_p.rc create them)
+	for d in data/vendor/gps data/vendor/log/gps data/vendor/agps_supl data/agps_supl data/misc \
+		mnt/vendor/nvdata mnt/vendor/nvcfg; do
+		mkdir -p "$R/$d"
+	done
+	# GNSS co-clock calibration lives in the phone's modem NVRAM (nvdata partition:
+	# md/NVRAM/CALIBRAT/{ML4A,EL6N}_000) and nvcfg (almanac.dat): mounted read-only
+	# from the phone's own partitions, never copied into any repository
+	if [ "$T2_MNLD_NVDATA" = auto ]; then
+		mount_ro_part nvdata "$R/mnt/vendor/nvdata"
+		mount_ro_part nvcfg "$R/mnt/vendor/nvcfg"
+	fi
+	mkdir -p /var/log/t2-vendor
+	# A-GPS: the EPO file fetched by titan2-epo goes to /data/vendor/gps/EPO.DAT of the chroot
+	# before mnld starts (the GPS HAL module has no XTRA injection entry: file path only)
+	[ ! -x /usr/bin/t2-epo-fetch ] || t2-epo-fetch -q --install-only "$R" || true
+	# mnld runs as root here (factory firmware: user gps, group gps/system/radio/wakelock...)
+	return 0
+}
+
+start_post() {
+	[ -n "$T2_MNLD_AGPS" ] || return 0
+	local R=$T2_VENDOR_ROOT
+	[ -x "$R/vendor/bin/mtk_agpsd" ] || { ewarn "no $R/vendor/bin/mtk_agpsd"; return 0; }
+	ebegin "Starting mtk_agpsd (SUPL, experimental)"
+	# factory mtk_agpsd_p.rc: sockets agpsd, agpsd2, agpsd3 (stream 660)
+	start-stop-daemon --start --background --make-pidfile --pidfile /run/t2-mnld-agpsd.pid \
+		--env LD_LIBRARY_PATH=/vendor/lib64:/system/lib64 --env ANDROID_DATA=/data --env ANDROID_ROOT=/system \
+		--stdout /var/log/t2-vendor/agpsd.log --stderr /var/log/t2-vendor/agpsd.log \
+		--exec /usr/bin/t2-initsock -- agpsd agpsd2 agpsd3 -- /usr/sbin/chroot "$R" /vendor/bin/mtk_agpsd
+	eend $?
+}
+
+stop_pre() {
+	if [ -f /run/t2-mnld-agpsd.pid ]; then
+		start-stop-daemon --stop --pidfile /run/t2-mnld-agpsd.pid 2>/dev/null
+		rm -f /run/t2-mnld-agpsd.pid
+	fi
+	return 0
+}
+
+stop_post() {
+	local R=$T2_VENDOR_ROOT d
+	for d in mnt/vendor/nvdata mnt/vendor/nvcfg; do
+		mountpoint -q "$R/$d" && umount "$R/$d"
+	done
+	# /dev, /proc, /sys of the chroot stay: t2-teed (same binds) may still run
+	return 0
+}
+
+status() {
+	default_status
+	t2-vendor-env status
+	echo "  devices: $(ls /dev/gpsdl0 /dev/gpsdl1 /dev/gps_emi /dev/gps_pwr /dev/gps2scp 2>/dev/null | tr '\n' ' ')"
+	echo "  control socket: $(ls -l /dev/socket/mnld 2>/dev/null || echo none)"
+	echo "  mnld log (tail): "; tail -5 /var/log/t2-vendor/mnld.log 2>/dev/null | sed 's/^/    /'
+	echo "  logcat MNLD (tail):"; grep -a MNLD /var/log/t2-vendor/logcat.log 2>/dev/null | tail -8 | sed 's/^/    /'
+}

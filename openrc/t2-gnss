@@ -1,0 +1,43 @@
+#!/sbin/openrc-run
+# SPDX-License-Identifier: GPL-2.0-or-later
+# Copyright (C) 2026 serlk <22211586+Serlk@users.noreply.github.com>
+#
+# GNSS bridge for Linux: t2-gnssd loads the vendor GPS HAL module of the factory firmware in-process
+# (bionic_translation), which talks to mnld (OpenRC t2-mnld), and serves NMEA on
+# /run/t2-gnss/nmea.sock for GeoClue (/etc/geoclue/conf.d/90-titan2-gnss.conf).
+# The receiver runs only while GeoClue (or another consumer) is connected,
+# unless T2_GNSSD_ARGS has -a. On every start it injects the system time, the
+# last fix and the EPO file of t2-epo (A-GPS without any closed SUPL client).
+description="Titan 2 GNSS: vendor GPS HAL in-process -> mnld, NMEA bridge for GeoClue"
+
+: "${T2_GNSSD_ARGS:=-S}"
+: "${T2_VENDOR_ROOT:=/var/lib/titan2-vendor}"
+export T2_VENDOR_ROOT
+
+supervisor=supervise-daemon
+command=/usr/bin/t2-gnssd
+command_args="-r $T2_VENDOR_ROOT $T2_GNSSD_ARGS"
+respawn_delay=5
+respawn_max=0
+output_log=/var/log/t2-gnssd.log
+error_log=/var/log/t2-gnssd.log
+
+depend() {
+	need localmount t2-mnld
+	after modules
+	use net
+}
+
+start_pre() {
+	checkpath -d -m 0755 /run/t2-gnss
+	checkpath -d -m 0755 /var/lib/t2-gnss
+	return 0
+}
+
+status() {
+	default_status
+	echo "  socket: $(ls -l /run/t2-gnss/nmea.sock 2>/dev/null || echo none)"
+	echo "  last fix: $(cat /var/lib/t2-gnss/last-fix 2>/dev/null || echo none)"
+	echo "  EPO: $(ls -l /var/lib/t2-gnss/epo/EPO.DAT 2>/dev/null || echo none)"
+	echo "  log (tail):"; tail -6 /var/log/t2-gnssd.log 2>/dev/null | sed 's/^/    /'
+}

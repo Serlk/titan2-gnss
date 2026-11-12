@@ -1,0 +1,11 @@
+# SPDX-License-Identifier: GPL-2.0-or-later
+# Copyright (C) 2026 serlk <22211586+Serlk@users.noreply.github.com>
+#
+# Properties of the GNSS stack, merged into <vendor root>/t2-props by t2-vendor-setup
+# (/usr/share/titan2-vendor-runtime/props.d/gnss.props). mnld and its libraries read
+# these instead of asking the kernel: the Titan 2 GNSS chip and A-die ids. t2-mnld sets
+# them again at every start.
+persist.vendor.connsys.chipid=0x6878
+vendor.connsys.gps.adie.chipid=0x6637
+vendor.connsys.driver.ready=yes
+vendor.service.nvram_init=Ready

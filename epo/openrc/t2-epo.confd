@@ -1,0 +1,13 @@
+# SPDX-License-Identifier: GPL-2.0-or-later
+# Copyright (C) 2026 serlk <22211586+Serlk@users.noreply.github.com>
+# /etc/conf.d/t2-epo: the open EPO downloader (t2-epo-fetch), read by the script itself
+# server and file: EPO_GR_3_1.DAT (GPS+GLONASS, 3 days) or EPO_GPS_3_1.DAT (GPS only); the
+# server serves only the _1 files (2026-11-10), EPO_*_3_2..10 answer 403
+#T2_EPO_URL=https://uepodownload.mediatek.com/
+#T2_EPO_FILE=EPO_GR_3_1.DAT
+# refresh when the stored file is older than this many seconds (default 6 h)
+#T2_EPO_MAX_AGE=21600
+# spool directory (t2-gnssd injects $T2_EPO_DIR/EPO.DAT)
+#T2_EPO_DIR=/var/lib/t2-gnss/epo
+# also fetch the quarter-EPO files QG_R/QGA/QBD2 (experimental, only used with --install)
+#T2_EPO_QEPO=1

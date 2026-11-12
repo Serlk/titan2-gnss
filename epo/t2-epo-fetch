@@ -1,0 +1,126 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-2.0-or-later
+# Copyright (C) 2026 serlk <22211586+Serlk@users.noreply.github.com>
+#
+# t2-epo-fetch: open downloader of the MediaTek EPO predicted-ephemeris file (A-GPS
+# without any closed SUPL client) for the Titan 2 GNSS stack (t2-gnssd / mnld).
+#
+# What mnld expects: files EPO_GR_3_<N>.DAT (GPS+GLONASS) and EPO_GPS_3_<N>.DAT,
+# N = 1..10, at https://uepodownload.mediatek.com/, each with a companion .MD5
+# (the digest alone). Checked 2026-11-10: the server answers only for N = 1
+# (EPO_GR_3_1.DAT = 48384 bytes = 12 six-hour sets x 56 SV x 72 bytes, i.e. 3 days;
+# EPO_GPS_3_1.DAT = 27648), every other N gives 403. mnld stores them as
+# /data/vendor/gps/EPO.DAT (its own download) or EPOHAL.DAT (data injected by the
+# HAL's XTRA/PSDS interface — the path t2-gnssd uses). Quarter EPO (6-hour sets)
+# QG_R.DAT / QGA.DAT / QBD2.DAT come from https://ugepodownload.mediatek.com/ and
+# land in QEPO.DAT / QEPO_GA.DAT / QEPO_BD.DAT (optional here, file install only).
+# The daemon in the chroot cannot resolve names (bionic DNS needs netd), so the
+# download happens here, on the Linux side, and the file reaches mnld through
+# t2-gnssd (inject_xtra_data) or by copying it into the vendor root (--install).
+#
+#   t2-epo-fetch [-f] [-q] [-v] [-d DIR] [--install [ROOT]]
+#     -f          fetch even when the current file is fresh
+#     -q          quiet (only errors); -v verbose
+#     -d DIR      spool directory (default /var/lib/t2-gnss/epo)
+#     --install [ROOT]  also copy EPO.DAT into ROOT/data/vendor/gps/ (default root
+#                 /var/lib/titan2-vendor), the file mnld reads itself; this is the
+#                 default whenever that directory exists (the Titan 2 GPS HAL has no
+#                 XTRA injection entry) — --no-install disables it
+#     --install-only    no download: just copy the spool file into the root (t2-mnld
+#                 runs this before starting mnld)
+#   /etc/conf.d/t2-epo: T2_EPO_URL, T2_EPO_FILE, T2_EPO_MAX_AGE, T2_EPO_QEPO, T2_EPO_DIR
+set -eu
+[ ! -r /etc/conf.d/t2-epo ] || . /etc/conf.d/t2-epo
+URL=${T2_EPO_URL:-https://uepodownload.mediatek.com/}
+QURL=${T2_EPO_QURL:-https://ugepodownload.mediatek.com/}
+FILE=${T2_EPO_FILE:-EPO_GR_3_1.DAT}
+MAX_AGE=${T2_EPO_MAX_AGE:-21600}
+DIR=${T2_EPO_DIR:-/var/lib/t2-gnss/epo}
+QEPO=${T2_EPO_QEPO:-}
+force= quiet= verbose= install=auto only= root=${T2_VENDOR_ROOT:-/var/lib/titan2-vendor}
+while [ $# -gt 0 ]; do
+	case "$1" in
+	-f) force=1 ;;
+	-q) quiet=1 ;;
+	-v) verbose=1 ;;
+	-d) DIR=$2; shift ;;
+	--install) install=1; case "${2:-}" in /*) root=$2; shift ;; esac ;;
+	--install-only) install=1; only=1; case "${2:-}" in /*) root=$2; shift ;; esac ;;
+	--no-install) install= ;;
+	-h|--help) sed -n '21,35p' "$0"; exit 0 ;;
+	*) echo "t2-epo-fetch: unknown option $1" >&2; exit 2 ;;
+	esac
+	shift
+done
+log() { [ -n "$quiet" ] || echo "t2-epo-fetch: $*" >&2; logger -t t2-epo "$*" 2>/dev/null || :; }
+dbg() { [ -z "$verbose" ] || echo "t2-epo-fetch: $*" >&2; }
+die() { echo "t2-epo-fetch: $*" >&2; logger -t t2-epo -p user.err "$*" 2>/dev/null || :; exit 1; }
+
+command -v curl >/dev/null 2>&1 || die "curl is not installed"
+mkdir -p "$DIR"
+# one fetch at a time (t2-gnssd, the NM dispatcher and cron may all ask)
+exec 9>"$DIR/.lock"
+flock -n 9 || { dbg "another fetch is running"; exit 0; }
+
+age_of() {	# seconds since the file was written, or a big number
+	[ -f "$1" ] || { echo 999999999; return; }
+	echo $(( $(date +%s) - $(stat -c %Y "$1") ))
+}
+
+fetch() {	# url name -> $DIR/.tmp.name ; 0 on success
+	curl -fsSL --max-time 120 --retry 2 -A "t2-epo-fetch/1 (Titan 2 Linux)" -o "$DIR/.tmp.$2" "$1$2"
+}
+
+# MD5 file: the hex digest, alone or "digest  name"
+md5_of_file() { tr -d '\r' <"$1" | tr 'A-F' 'a-f' | grep -o -m1 '[0-9a-f]\{32\}' || :; }
+
+download_epo() {	# base-url name dest  (name.MD5 is checked when the server has it)
+	local url=$1 name=$2 dest=$3 want got size
+	fetch "$url" "$name" || { log "download of $url$name failed"; return 1; }
+	size=$(stat -c %s "$DIR/.tmp.$name")
+	[ "$size" -gt 0 ] && [ $((size % 72)) -eq 0 ] || { log "$name: unexpected size $size (not a multiple of 72)"; rm -f "$DIR/.tmp.$name"; return 1; }
+	if fetch "$url" "${name%.DAT}.MD5"; then
+		want=$(md5_of_file "$DIR/.tmp.${name%.DAT}.MD5")
+		got=$(md5sum "$DIR/.tmp.$name" | cut -d' ' -f1)
+		rm -f "$DIR/.tmp.${name%.DAT}.MD5"
+		[ -n "$want" ] && [ "$want" = "$got" ] || { log "$name: MD5 mismatch ($got, server $want)"; rm -f "$DIR/.tmp.$name"; return 1; }
+		dbg "$name: MD5 ok"
+	else
+		dbg "$name: no MD5 on the server, size check only"
+	fi
+	chmod 644 "$DIR/.tmp.$name"
+	mv -f "$DIR/.tmp.$name" "$dest"
+	echo "$name $(date -u +%FT%TZ) $size" >"$dest.info"
+	log "$dest: $name, $size bytes"
+}
+
+rc=0
+if [ -n "$only" ]; then
+	:
+elif [ -n "$force" ] || [ "$(age_of "$DIR/EPO.DAT")" -ge "$MAX_AGE" ]; then
+	download_epo "$URL" "$FILE" "$DIR/EPO.DAT" || rc=1
+else
+	dbg "EPO.DAT is $(age_of "$DIR/EPO.DAT") s old (< $MAX_AGE), nothing to do"
+fi
+if [ -n "$QEPO" ] && [ -z "$only" ]; then
+	# quarter EPO: experimental (the stored-file format of mnld's own QEPO downloader is not verified)
+	for q in QG_R.DAT:QEPO.DAT QGA.DAT:QEPO_GA.DAT QBD2.DAT:QEPO_BD.DAT; do
+		if [ -n "$force" ] || [ "$(age_of "$DIR/${q#*:}")" -ge 5400 ]; then
+			download_epo "$QURL" "${q%%:*}" "$DIR/${q#*:}" || :
+		fi
+	done
+fi
+[ "$install" = auto ] && { [ -d "$root/data/vendor/gps" ] && install=1 || install=; }
+if [ -n "$install" ] && [ -f "$DIR/EPO.DAT" ]; then
+	mkdir -p "$root/data/vendor/gps"
+	n=0
+	for f in EPO.DAT QEPO.DAT QEPO_GA.DAT QEPO_BD.DAT; do
+		[ -f "$DIR/$f" ] || continue
+		# only when the spool copy is newer (mnld rewrites/merges its own copy)
+		if [ ! -f "$root/data/vendor/gps/$f" ] || [ "$DIR/$f" -nt "$root/data/vendor/gps/$f" ]; then
+			cp -f "$DIR/$f" "$root/data/vendor/gps/.$f.tmp" && mv -f "$root/data/vendor/gps/.$f.tmp" "$root/data/vendor/gps/$f" && n=$((n + 1))
+		fi
+	done
+	[ "$n" -eq 0 ] && dbg "$root/data/vendor/gps already up to date" || log "installed $n file(s) into $root/data/vendor/gps"
+fi
+exit $rc

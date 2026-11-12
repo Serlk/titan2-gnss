@@ -1,0 +1,8 @@
+# SPDX-License-Identifier: GPL-2.0-or-later
+# Copyright (C) 2026 serlk <22211586+Serlk@users.noreply.github.com>
+#
+# Packages for an image built by titan2-tools' scripts/netroot-serve.sh with this
+# repository enabled (titan2-gnss and titan2-epo from aports/, titan2-vendor-runtime from
+# titan2-tools, bionic_translation with the vendor-profile patches: all from the local apk
+# repository; geoclue and curl from Alpine).
+titan2-gnss titan2-epo titan2-vendor-runtime bionic_translation geoclue curl

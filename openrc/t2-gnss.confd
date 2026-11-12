@@ -1,0 +1,8 @@
+# SPDX-License-Identifier: GPL-2.0-or-later
+# Copyright (C) 2026 serlk <22211586+Serlk@users.noreply.github.com>
+# /etc/conf.d/t2-gnss: the GNSS bridge t2-gnssd (needs t2-mnld)
+# t2-gnssd options (t2-gnssd -h): -S GSV in synthesized NMEA, -a always on, -i MS fix
+# interval, -m 1 MS-based (SUPL via mtk_agpsd), -N no time injection, -L no last-fix
+# injection, -E no EPO, -F never run t2-epo-fetch, -c cold start, -v verbose
+#T2_GNSSD_ARGS="-S"
+#T2_VENDOR_ROOT=/var/lib/titan2-vendor

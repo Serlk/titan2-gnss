@@ -1,0 +1,79 @@
+# SPDX-License-Identifier: GPL-2.0-or-later
+# Copyright (C) 2026 serlk <22211586+Serlk@users.noreply.github.com>
+#
+# GNSS files of the Titan 2 factory firmware (Android 14) for the native vendor chroot: the MediaTek
+# navigation daemon mnld (OpenRC t2-mnld), the SUPL daemon mtk_agpsd (optional), gps_dump and
+# the legacy GPS HAL module gps.default.so that t2-gnssd loads in-process (bionic_translation).
+# SELF-SUFFICIENT: the complete DT_NEEDED closure of the four binaries (needed-closure.py of titan2-vendor-runtime,
+# 2026-11-11) plus the bionic linker and the property tools t2-vendor-env uses, so
+#   t2-vendor-setup SRC [DEST] /usr/share/titan2-vendor-runtime/files.d/gnss.txt
+# alone gives a root mnld links in ("CANNOT LINK EXECUTABLE ... libhidlbase.so not found" was the
+# earlier pruned list that relied on the vendor-container list). Data lines carry NO trailing
+# comments: t2-vendor-setup takes the rest of the line as the destination. Shared with
+# the fingerprint list (same destination, copied twice harmlessly): linker64, libapexsupport, libbase,
+# libbinder, libc, libc++, libcrypto, libcutils, libdl, libdl_android, liblog, libm, libutils,
+# libvndksupport, libz.
+# The AIDL service android.hardware.gnss-service.mediatek is NOT needed (no binder path).
+#   <source below system_a / system_ext_a / vendor_a>   <path below the vendor root>
+# bionic runtime: the linker (PT_INTERP /system/bin/linker64 of every vendor binary)
+system/bin/bootstrap/linker64			system/bin/linker64
+# property tools for t2-vendor-env prop/status (toolbox applets; optional)
+?system/bin/toolbox				system/bin/toolbox
+?system/bin/getprop				system/bin/getprop
+?system/bin/setprop				system/bin/setprop
+# the daemons and the HAL module
+vendor/bin/mnld					vendor/bin/mnld
+vendor/bin/mtk_agpsd				vendor/bin/mtk_agpsd
+vendor/bin/gps_dump				vendor/bin/gps_dump
+vendor/lib64/hw/gps.default.so			vendor/lib64/hw/gps.default.so
+# configuration files the daemons read
+?vendor/etc/gps.conf				vendor/etc/gps.conf
+?vendor/etc/MNL_Config.xml			vendor/etc/MNL_Config.xml
+?vendor/etc/agps_profiles_conf2.xml		vendor/etc/agps_profiles_conf2.xml
+?vendor/etc/slp_conf				vendor/etc/slp_conf
+?vendor/etc/gnss/				vendor/etc/gnss/
+# DT_NEEDED closure of mnld, mtk_agpsd, gps_dump, gps.default.so (44 libraries, ~25 MB)
+system/lib64/android.frameworks.sensorservice-V1-ndk.so	system/lib64/android.frameworks.sensorservice-V1-ndk.so
+system/lib64/android.frameworks.sensorservice@1.0.so	system/lib64/android.frameworks.sensorservice@1.0.so
+system/lib64/android.hardware.common-V2-ndk.so	system/lib64/android.hardware.common-V2-ndk.so
+system/lib64/android.hardware.common.fmq-V1-ndk.so	system/lib64/android.hardware.common.fmq-V1-ndk.so
+system/lib64/android.hardware.sensors-V2-ndk.so	system/lib64/android.hardware.sensors-V2-ndk.so
+system/lib64/android.hardware.sensors@1.0.so	system/lib64/android.hardware.sensors@1.0.so
+system/lib64/ld-android.so	system/lib64/ld-android.so
+system/lib64/libandroid_net.so	system/lib64/libandroid_net.so
+system/lib64/libapexsupport.so	system/lib64/libapexsupport.so
+system/lib64/libbase.so	system/lib64/libbase.so
+system/lib64/libbinder.so	system/lib64/libbinder.so
+system/lib64/libbinder_ndk.so	system/lib64/libbinder_ndk.so
+system/lib64/libc++.so	system/lib64/libc++.so
+system/lib64/bootstrap/libc.so	system/lib64/libc.so
+system/lib64/libcrypto.so	system/lib64/libcrypto.so
+system/lib64/libcurl.so	system/lib64/libcurl.so
+system/lib64/libcutils.so	system/lib64/libcutils.so
+system/lib64/bootstrap/libdl.so	system/lib64/libdl.so
+system/lib64/bootstrap/libdl_android.so	system/lib64/libdl_android.so
+system/lib64/libexpat.so	system/lib64/libexpat.so
+system/lib64/libhardware.so	system/lib64/libhardware.so
+system/lib64/libhidlbase.so	system/lib64/libhidlbase.so
+system/lib64/libhidltransport.so	system/lib64/libhidltransport.so
+system/lib64/liblog.so	system/lib64/liblog.so
+system/lib64/liblzma.so	system/lib64/liblzma.so
+system/lib64/bootstrap/libm.so	system/lib64/libm.so
+system/lib64/libnetd_client.so	system/lib64/libnetd_client.so
+system/lib64/libnl.so	system/lib64/libnl.so
+system/lib64/libssl.so	system/lib64/libssl.so
+system/lib64/libunwindstack.so	system/lib64/libunwindstack.so
+system/lib64/libutils.so	system/lib64/libutils.so
+system/lib64/libvndksupport.so	system/lib64/libvndksupport.so
+system/lib64/libz.so	system/lib64/libz.so
+vendor/lib64/libDR.so	vendor/lib64/libDR.so
+vendor/lib64/libhfmanager.so	vendor/lib64/libhfmanager.so
+vendor/lib64/libladder.so	vendor/lib64/libladder.so
+vendor/lib64/libmipc.so	vendor/lib64/libmipc.so
+vendor/lib64/libmnl.so	vendor/lib64/libmnl.so
+vendor/lib64/libmtkproperty.so	vendor/lib64/libmtkproperty.so
+vendor/lib64/libmtkrillog.so	vendor/lib64/libmtkrillog.so
+vendor/lib64/libnvram.so	vendor/lib64/libnvram.so
+vendor/lib64/libnvram_sec.so	vendor/lib64/libnvram_sec.so
+vendor/lib64/libsensorndkbridge.so	vendor/lib64/libsensorndkbridge.so
+vendor/lib64/libtrm.so	vendor/lib64/libtrm.so
