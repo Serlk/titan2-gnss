@@ -51,7 +51,8 @@ install: all
 	install -Dm644 files/gnss.props $(SHARE)/props.d/gnss.props
 
 dist:
-	tar -C .. --exclude=.git --exclude='*.o' --exclude=t2-gnssd --exclude=t2-initsock \
+	tar -C .. --exclude=.git --exclude='*.o' --exclude='$(notdir $(CURDIR))/t2-gnssd' \
+		--exclude='$(notdir $(CURDIR))/t2-initsock' \
 		--exclude='*.tar.gz' --exclude=__pycache__ --owner=0 --group=0 --mtime=@0 --sort=name \
 		--transform 's,^$(notdir $(CURDIR)),titan2-gnss,' \
 		-czf aports/titan2-gnss/titan2-gnss.tar.gz $(notdir $(CURDIR))
