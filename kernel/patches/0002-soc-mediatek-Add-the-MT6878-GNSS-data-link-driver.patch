@@ -22,10 +22,10 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
  create mode 100644 drivers/soc/mediatek/mtk-gps-dl.c
 
 diff --git a/drivers/soc/mediatek/Kconfig b/drivers/soc/mediatek/Kconfig
-index f593a80ce2b1..2e1b25cf4097 100644
+index 56b8d7326879..6a6079ad515d 100644
 --- a/drivers/soc/mediatek/Kconfig
 +++ b/drivers/soc/mediatek/Kconfig
-@@ -43,6 +43,17 @@ config MTK_LPM
+@@ -61,6 +61,17 @@ config MTK_LPM
  	  the interrupts kept through MCUSYS off, the SPM constraints, and
  	  the report of what woke the system and how deep it slept.
  
@@ -44,10 +44,10 @@ index f593a80ce2b1..2e1b25cf4097 100644
  	tristate "Mediatek Device APC Support"
  	help
 diff --git a/drivers/soc/mediatek/Makefile b/drivers/soc/mediatek/Makefile
-index ad51380d36cc..869f48d6543f 100644
+index a98a4c6c2e25..77c57f1eda2f 100644
 --- a/drivers/soc/mediatek/Makefile
 +++ b/drivers/soc/mediatek/Makefile
-@@ -5,6 +5,7 @@ obj-$(CONFIG_MTK_CONNINFRA) += mtk-conninfra.o
+@@ -6,6 +6,7 @@ obj-$(CONFIG_MTK_CONNINFRA) += mtk-conninfra.o
  obj-$(CONFIG_MTK_DEVAPC) += mtk-devapc.o
  obj-$(CONFIG_MTK_DVFSRC) += mtk-dvfsrc.o
  obj-$(CONFIG_MTK_LPM) += mtk-lpm.o
@@ -1516,5 +1516,5 @@ index 000000000000..25121cfbcd8f
 +MODULE_DESCRIPTION("MediaTek MT6878 GNSS data link");
 +MODULE_LICENSE("GPL");
 -- 
-2.56.0
+2.56.1
 

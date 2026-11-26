@@ -30,11 +30,11 @@ https://github.com/Serlk/titan2-linux:
 
     git clone -b titan2 https://github.com/Serlk/titan2-linux linux
     cd linux
-    git checkout -b titan2-local 50a22e5003dd4a71f27f241069064799bf2a6a3c
+    git checkout -b titan2-local 035b459a3c6cc246eff2c9557ec8b0c78a3292a7
     git am ../../titan2-gnss/kernel/patches/*.patch
     cd ..
 
-The series was made with `git format-patch` on `titan2` commit `50a22e5003dd4a71f27f241069064799bf2a6a3c` (the `git checkout` line
+The series was made with `git format-patch` on `titan2` commit `035b459a3c6cc246eff2c9557ec8b0c78a3292a7` (the `git checkout` line
 above). A newer `titan2` usually takes it as well (`git checkout -b titan2-local titan2`); if
 `git am` stops, use the base commit. The series of titan2-camera, titan2-fingerprint and
 titan2-gnss touch different hunks and can be applied one after another on the same tree (tested
