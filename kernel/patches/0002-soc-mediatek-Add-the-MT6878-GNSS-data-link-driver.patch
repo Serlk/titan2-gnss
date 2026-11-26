@@ -22,12 +22,12 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
  create mode 100644 drivers/soc/mediatek/mtk-gps-dl.c
 
 diff --git a/drivers/soc/mediatek/Kconfig b/drivers/soc/mediatek/Kconfig
-index 56b8d7326879..6a6079ad515d 100644
+index 192471d57fe7..4c3f811f04e7 100644
 --- a/drivers/soc/mediatek/Kconfig
 +++ b/drivers/soc/mediatek/Kconfig
-@@ -61,6 +61,17 @@ config MTK_LPM
- 	  the interrupts kept through MCUSYS off, the SPM constraints, and
- 	  the report of what woke the system and how deep it slept.
+@@ -62,6 +62,17 @@ config MTK_LPM
+ 	  clocks and PLLs switched off for the sleep only, and the report of
+ 	  what woke the system and how deep it slept.
  
 +config MTK_GPS_DL
 +	tristate "MediaTek MT6878 GNSS data link (CONNSYS GPS DSPs)"

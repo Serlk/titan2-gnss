@@ -124,6 +124,10 @@ NMEA for two minutes; `nc -U /run/t2-gnss/nmea.sock` reads the socket;
 A client for the vendor extensions (measurements, geofence); SUPL (`mtk_agpsd` needs a DNS and
 data path the chroot does not provide); a reference location from the modem's cell.
 
+Known issue: after boot, the first start of the location engine service (`t2-mnld`) can loop on a
+chipset check and never open its socket; a second start (`rc-service t2-mnld restart`) works. Seen
+on several boots (11.11, 12.11 and 26.11.2026); being investigated.
+
 ## How this project is made / affiliation
 
 - This project is developed with the help of AI coding assistants (Anthropic Claude). Commits
