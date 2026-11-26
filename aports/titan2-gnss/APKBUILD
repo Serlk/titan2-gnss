@@ -8,14 +8,17 @@
 # (`make dist`, then `abuild checksum`).
 pkgname=titan2-gnss
 pkgver=0.3
-pkgrel=0
+pkgrel=1
 pkgdesc="Unihertz Titan 2 GNSS: mnld in a bionic chroot, GPS HAL in-process, NMEA for GeoClue"
 url="https://github.com/Serlk/titan2-gnss"
 arch="aarch64"
 license="GPL-2.0-or-later"
-# titan2-epo fetches the EPO assistance file; geoclue reads the NMEA socket
-depends="titan2-vendor-runtime bionic_translation openrc geoclue"
-makedepends="titan2-vendor-runtime-dev bionic_translation-dev"
+# titan2-epo fetches the EPO assistance file; geoclue reads the NMEA socket.
+# bionic_translation is pinned to our rebuild with the vendor-profile patches
+# (titan2-tools: tools/titan2-vendor-runtime/patches/bionic_translation; pkgrel =
+# 100 + the number of patches): a newer Alpine snapshot sorts above it but lacks them.
+depends="titan2-vendor-runtime bionic_translation=0_git20260317-r108 openrc geoclue"
+makedepends="titan2-vendor-runtime-dev bionic_translation-dev=0_git20260317-r108"
 options="!check"
 source="titan2-gnss.tar.gz"
 builddir="$srcdir/titan2-gnss"
