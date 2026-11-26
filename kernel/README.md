@@ -30,14 +30,14 @@ https://github.com/Serlk/titan2-linux:
 
     git clone -b titan2 https://github.com/Serlk/titan2-linux linux
     cd linux
-    git checkout -b titan2-local 8c61a1b594a6f01c75efd5f8c4318f8ec416ae62
+    git checkout -b titan2-local fbb73db066ac2a04eaaa7052e6f07fd2b10ea027
     # git am records a committer: if git has no identity on this PC yet, set one for this tree
     git config user.email >/dev/null || git config user.email builder@localhost
     git config user.name >/dev/null || git config user.name "titan2 builder"
     git am ../../titan2-gnss/kernel/patches/*.patch
     cd ..
 
-The series was made with `git format-patch` on `titan2` commit `8c61a1b594a6f01c75efd5f8c4318f8ec416ae62` (the `git checkout` line
+The series was made with `git format-patch` on `titan2` commit `fbb73db066ac2a04eaaa7052e6f07fd2b10ea027` (the `git checkout` line
 above). A newer `titan2` usually takes it as well (`git checkout -b titan2-local titan2`); if
 `git am` stops, use the base commit. The series of titan2-camera, titan2-fingerprint and
 titan2-gnss touch different hunks and can be applied one after another on the same tree (tested
