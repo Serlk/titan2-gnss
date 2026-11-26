@@ -5,7 +5,8 @@
 # Titan 2 A-GPS: the open downloader of the MediaTek EPO predicted-ephemeris file
 # (t2-epo-fetch, OpenRC t2-epo, cron and NetworkManager hooks). The file is downloaded at
 # run time on the phone; it is never part of the package. Source: epo/ of this repository
-# (`make dist`, then `abuild checksum`).
+# (`make dist`, then titan2-tools' scripts/t2-repo.sh aport,
+# which writes the sha512sums; by hand: `abuild checksum`).
 pkgname=titan2-epo
 pkgver=0.1
 pkgrel=1

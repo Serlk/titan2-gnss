@@ -5,7 +5,8 @@
 # Titan 2 GNSS on mainline: the MediaTek navigation daemon mnld of the phone's own firmware
 # run natively in the vendor chroot (t2-mnld) and the bridge t2-gnssd (the vendor GPS HAL
 # in-process -> NMEA socket for GeoClue). Contains no vendor files. Source: this repository
-# (`make dist`, then `abuild checksum`).
+# (`make dist`, then titan2-tools' scripts/t2-repo.sh aport,
+# which writes the sha512sums; by hand: `abuild checksum`).
 pkgname=titan2-gnss
 pkgver=0.3
 pkgrel=1

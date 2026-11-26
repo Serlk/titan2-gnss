@@ -31,6 +31,9 @@ https://github.com/Serlk/titan2-linux:
     git clone -b titan2 https://github.com/Serlk/titan2-linux linux
     cd linux
     git checkout -b titan2-local 8c61a1b594a6f01c75efd5f8c4318f8ec416ae62
+    # git am records a committer: if git has no identity on this PC yet, set one for this tree
+    git config user.email >/dev/null || git config user.email builder@localhost
+    git config user.name >/dev/null || git config user.name "titan2 builder"
     git am ../../titan2-gnss/kernel/patches/*.patch
     cd ..
 
